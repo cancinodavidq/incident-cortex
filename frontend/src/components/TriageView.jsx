@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useWebSocket } from "../hooks/useWebSocket";
 
 // ── Design tokens ─────────────────────────────────────────────────────────────
@@ -9,139 +9,186 @@ const SEV = {
   P4: { bg:"rgba(34,197,94,.1)",  border:"rgba(34,197,94,.35)",  badge:"#22c55e", badgeText:"#000",    label:"Low"       },
 };
 
-const AGENTS = [
-  { id:"intake",        icon:"🔍", label:"Parse Report"     },
-  { id:"code_analysis", icon:"💻", label:"Code Analysis"    },
-  { id:"dedup",         icon:"🔁", label:"Dedup Check"      },
-  { id:"triage_synth",  icon:"⚙️", label:"Triage Synthesis" },
-  { id:"escalate",      icon:"🚨", label:"P1 Escalation",  conditional:true },
-  { id:"ticket",        icon:"🎫", label:"Create Ticket"    },
-  { id:"notify",        icon:"📣", label:"Notifications"    },
-];
-
-const PARALLEL = new Set(["code_analysis","dedup"]);
+const TOOL_META = {
+  intake:        { icon:"🔍", label:"parse_incident",     color:"#a5b4fc" },
+  code_analysis: { icon:"💻", label:"search_codebase",    color:"#86efac" },
+  dedup:         { icon:"🔁", label:"check_duplicates",   color:"#86efac" },
+  triage_synth:  { icon:"⚙️", label:"synthesize_triage",  color:"#fcd34d" },
+  escalate:      { icon:"🚨", label:"escalate_p1",        color:"#fca5a5" },
+  ticket:        { icon:"🎫", label:"create_ticket",      color:"#a5b4fc" },
+  notify:        { icon:"📣", label:"send_notifications", color:"#fdba74" },
+};
 
 function cleanStep(s) { return s.replace(/^\d+\.\d*\s*/, "").replace(/^[-•]\s*/, "").trim(); }
 
-// ── Status dot ────────────────────────────────────────────────────────────────
-function StatusDot({ status }) {
-  if (status === "running") return (
-    <span style={{ display:"flex", alignItems:"center", justifyContent:"center", width:18, height:18, flexShrink:0 }}>
-      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
-      <span style={{ width:12, height:12, border:"2px solid var(--accent)", borderTopColor:"transparent", borderRadius:"50%", display:"inline-block", animation:"spin .7s linear infinite" }} />
-    </span>
-  );
-  if (status === "done") return (
-    <span style={{ width:18, height:18, borderRadius:"50%", background:"rgba(34,197,94,.2)", border:"1px solid rgba(34,197,94,.4)", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, fontSize:9, color:"var(--green)" }}>✓</span>
-  );
-  return (
-    <span style={{ width:18, height:18, borderRadius:"50%", border:"1px solid var(--border2)", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }} />
-  );
-}
-
-// ── Inline result per agent ───────────────────────────────────────────────────
-function AgentResult({ id, data }) {
+// ── Tool result snippet ───────────────────────────────────────────────────────
+function ToolSnippet({ agent, data }) {
   if (!data) return null;
-  const s = { fontSize:11, color:"var(--text3)", marginTop:2 };
+  const st = { fontSize:11, color:"var(--text3)", marginTop:3, lineHeight:1.5 };
 
-  if (id === "intake") {
+  if (agent === "intake") {
     if (data.information_sufficient === false)
-      return <div style={{...s, color:"#fcd34d"}}>⚠ Needs clarification</div>;
+      return <span style={{...st, color:"#fcd34d"}}>⚠ needs clarification</span>;
     const parts = [data.affected_service, data.error_type].filter(Boolean);
-    return <div style={s}>{parts.join(" · ") || "Parsed"}</div>;
+    return <span style={st}>{parts.join(" · ") || "parsed"}</span>;
   }
-  if (id === "code_analysis") {
-    const n = data.relevant_files?.length || 0;
-    return <div style={s}>{n ? `${n} file${n>1?"s":""} identified` : "No files found"}</div>;
+  if (agent === "code_analysis") {
+    const files = data.relevant_files || [];
+    const n = files.length;
+    if (data.degraded) return <span style={{...st, color:"#fcd34d"}}>degraded — no index yet</span>;
+    return <span style={st}>{n ? `${n} file${n>1?"s":""} · ${files[0]?.split("/").pop() || ""}` : "no files found"}</span>;
   }
-  if (id === "dedup") {
+  if (agent === "dedup") {
     const sim = Math.round((data.highest_similarity||0)*100);
-    return <div style={{...s, color: data.is_duplicate ? "#fcd34d" : "var(--green)"}}>
-      {data.is_duplicate ? `Duplicate · ${sim}% match` : `New · ${sim}% max similarity`}
-    </div>;
+    return <span style={{...st, color: data.is_duplicate ? "#fcd34d" : "#86efac"}}>
+      {data.is_duplicate ? `duplicate · ${sim}% match` : `new · ${sim}% max sim`}
+    </span>;
   }
-  if (id === "triage_synth") {
-    if (!data.severity) return <div style={{...s}}>Skipped</div>;
-    const sev = SEV[data.severity] || SEV.P3;
+  if (agent === "triage_synth") {
+    if (!data.severity) return <span style={st}>skipped (duplicate)</span>;
+    const sev = SEV[data.severity];
     return (
-      <div style={{ display:"flex", alignItems:"center", gap:6, marginTop:2 }}>
-        <span style={{ background:sev.badge, color:sev.badgeText, padding:"1px 6px", borderRadius:4, fontSize:11, fontWeight:700 }}>{data.severity}</span>
-        <span style={s}>{Math.round((data.confidence||0)*100)}% confidence</span>
-      </div>
+      <span style={{ display:"inline-flex", alignItems:"center", gap:5, marginTop:3 }}>
+        <span style={{ background:sev?.badge, color:sev?.badgeText, padding:"1px 5px", borderRadius:4, fontSize:10, fontWeight:700 }}>{data.severity}</span>
+        <span style={st}>{Math.round((data.confidence||0)*100)}% conf · {data.runbook_steps||0} runbook steps</span>
+      </span>
     );
   }
-  if (id === "ticket") {
-    return data.ticket_id
-      ? <div style={{...s, color:"var(--accent)", fontFamily:"monospace"}}>{data.ticket_id}</div>
-      : <div style={s}>No ticket</div>;
-  }
-  if (id === "notify") {
-    const sent = data.notifications_sent || [];
-    return <div style={s}>{sent.length ? sent.map(n => n.replace("_email"," email")).join(", ") : "None sent"}</div>;
+  if (agent === "escalate")
+    return <span style={{...st, color:"#fca5a5"}}>oncall paged · {data.team_paged || "sre-team"}</span>;
+  if (agent === "ticket")
+    return <span style={{...st, color:"#a5b4fc", fontFamily:"monospace"}}>{data.ticket_id || "MANUAL-REQUIRED"}</span>;
+  if (agent === "notify") {
+    const sent = (data.notifications_sent||[]).map(n => n.replace("_email"," ✉").replace("slack","💬 slack"));
+    return <span style={st}>{sent.join(" · ") || "none"}</span>;
   }
   return null;
 }
 
-// ── Pipeline panel ────────────────────────────────────────────────────────────
-function PipelinePanel({ agentState }) {
-  const st = (id) => agentState[id] || { status:"pending", result:null };
-
-  const rowStyle = (status) => ({
-    display:"flex", alignItems:"flex-start", gap:10, padding:"9px 14px", borderRadius:7,
-    background: status==="running" ? "rgba(91,106,240,.08)" : "transparent",
-    transition:"background .2s",
-  });
-
-  const labelStyle = (status) => ({
-    fontSize:13, fontWeight:500, color:
-      status==="running" ? "var(--text)" :
-      status==="done"    ? "var(--text)" : "var(--text3)",
-    lineHeight:1,
-  });
-
-  const renderRow = (a) => {
-    const { status, result } = st(a.id);
-    // Only show conditional (escalate) row if it ran
-    if (a.conditional && status === "pending") return null;
-    return (
-      <div key={a.id} style={rowStyle(status)}>
-        <div style={{ paddingTop:2 }}><StatusDot status={status} /></div>
-        <div style={{ flex:1, minWidth:0 }}>
-          <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-            <span style={{ fontSize:13 }}>{a.icon}</span>
-            <span style={labelStyle(status)}>{a.label}</span>
-            {status==="running" && <span style={{ fontSize:11, color:"var(--accent)", opacity:.8 }}>running</span>}
-          </div>
-          <AgentResult id={a.id} data={result} />
-        </div>
-      </div>
-    );
-  };
-
-  const seq1    = AGENTS.filter(a => a.id === "intake");
-  const par     = AGENTS.filter(a => PARALLEL.has(a.id));
-  const seq2    = AGENTS.filter(a => !PARALLEL.has(a.id) && a.id !== "intake");
-  const divider = <div style={{ height:1, background:"var(--border)", margin:"4px 0" }} />;
-  const parLabel = (
-    <div style={{ display:"flex", alignItems:"center", gap:8, padding:"4px 14px" }}>
-      <div style={{ flex:1, height:1, background:"var(--border)" }} />
-      <span style={{ fontSize:10, color:"var(--text3)", fontWeight:600, letterSpacing:"0.08em", textTransform:"uppercase" }}>parallel</span>
-      <div style={{ flex:1, height:1, background:"var(--border)" }} />
-    </div>
+// ── Spinner ───────────────────────────────────────────────────────────────────
+function Spinner({ size=10 }) {
+  return (
+    <>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+      <span style={{ width:size, height:size, border:`1.5px solid rgba(91,106,240,.3)`, borderTopColor:"var(--accent)", borderRadius:"50%", display:"inline-block", animation:"spin .6s linear infinite", flexShrink:0 }} />
+    </>
   );
+}
+
+// ── ReAct log panel ───────────────────────────────────────────────────────────
+function ReactLog({ toolLog, pipelineDone, totalIterations }) {
+  const bottomRef = useRef(null);
+
+  useEffect(() => {
+    if (bottomRef.current) bottomRef.current.scrollIntoView({ behavior:"smooth" });
+  }, [toolLog]);
+
+  // Group by turn
+  const turnMap = {};
+  for (const entry of toolLog) {
+    const t = entry.turn || 1;
+    if (!turnMap[t]) turnMap[t] = [];
+    turnMap[t].push(entry);
+  }
+  const turns = Object.keys(turnMap)
+    .map(Number)
+    .sort((a,b) => a-b)
+    .map(t => ({ turn:t, tools:turnMap[t] }));
+
+  const maxTurn = turns.length ? Math.max(...turns.map(t=>t.turn)) : 0;
+  const hasRunning = toolLog.some(e => e.status === "running");
 
   return (
     <div style={{ background:"var(--surface)", border:"1px solid var(--border)", borderRadius:10, overflow:"hidden" }}>
-      <div style={{ padding:"10px 14px 8px", borderBottom:"1px solid var(--border)" }}>
-        <span style={{ fontSize:11, fontWeight:600, color:"var(--text3)", textTransform:"uppercase", letterSpacing:"0.07em" }}>Pipeline</span>
+      {/* Header */}
+      <div style={{ padding:"10px 14px", borderBottom:"1px solid var(--border)", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+          <span style={{ fontSize:11, fontWeight:600, color:"var(--text3)", textTransform:"uppercase", letterSpacing:"0.07em" }}>ReAct Loop</span>
+          <span style={{ fontSize:10, padding:"1px 6px", background:"rgba(91,106,240,.12)", border:"1px solid rgba(91,106,240,.25)", borderRadius:4, color:"#a5b4fc", fontFamily:"monospace" }}>claude-sonnet-4-6</span>
+        </div>
+        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+          {hasRunning && <Spinner size={9} />}
+          {(pipelineDone && totalIterations) ? (
+            <span style={{ fontSize:11, color:"var(--text3)", fontFamily:"monospace" }}>{totalIterations} turns</span>
+          ) : maxTurn > 0 ? (
+            <span style={{ fontSize:11, color:"var(--text3)", fontFamily:"monospace" }}>turn {maxTurn}</span>
+          ) : null}
+          {pipelineDone && (
+            <span style={{ width:7, height:7, borderRadius:"50%", background:"var(--green)", display:"inline-block" }} />
+          )}
+        </div>
       </div>
-      <div style={{ padding:"6px 0" }}>
-        {seq1.map(renderRow)}
-        {divider}
-        {parLabel}
-        {par.map(renderRow)}
-        {divider}
-        {seq2.map(renderRow)}
+
+      {/* Log body */}
+      <div style={{ padding:"8px 0", maxHeight:420, overflowY:"auto", fontSize:12 }}>
+        {turns.length === 0 && (
+          <div style={{ padding:"16px 14px", color:"var(--text3)", display:"flex", alignItems:"center", gap:8 }}>
+            <Spinner size={10} />
+            <span>Waiting for Claude…</span>
+          </div>
+        )}
+
+        {turns.map(({ turn, tools }) => {
+          const isParallel = tools.length > 1;
+          const allDone    = tools.every(t => t.status === "done");
+          const anyRunning = tools.some(t => t.status === "running");
+
+          return (
+            <div key={turn} style={{ borderBottom:"1px solid rgba(37,40,54,.6)", paddingBottom:8, marginBottom:2 }}>
+              {/* Turn header */}
+              <div style={{ display:"flex", alignItems:"center", gap:8, padding:"4px 14px 2px" }}>
+                <span style={{ fontSize:10, color:"var(--text3)", fontFamily:"monospace", minWidth:40 }}>
+                  turn {turn}
+                </span>
+                {isParallel && (
+                  <span style={{ fontSize:9, padding:"1px 5px", background:"rgba(91,106,240,.1)", border:"1px solid rgba(91,106,240,.2)", borderRadius:3, color:"#a5b4fc", fontWeight:600, letterSpacing:"0.05em", textTransform:"uppercase" }}>parallel</span>
+                )}
+                {anyRunning && <Spinner size={8} />}
+                {allDone && !anyRunning && (
+                  <span style={{ fontSize:9, color:"#86efac", opacity:.7 }}>✓</span>
+                )}
+              </div>
+
+              {/* Tool rows */}
+              {tools.map((entry, i) => {
+                const meta = TOOL_META[entry.agent] || { icon:"🔧", label:entry.agent, color:"var(--text3)" };
+                const isRunning = entry.status === "running";
+                const isDone    = entry.status === "done";
+
+                return (
+                  <div key={i} style={{
+                    display:"flex", alignItems:"flex-start", gap:10, padding:"5px 14px 3px 32px",
+                    background: isRunning ? "rgba(91,106,240,.06)" : "transparent",
+                    transition:"background .2s",
+                  }}>
+                    {/* Status indicator */}
+                    <div style={{ flexShrink:0, marginTop:1 }}>
+                      {isRunning ? <Spinner size={10} /> : (
+                        <span style={{ width:10, height:10, borderRadius:"50%", background: isDone ? "rgba(34,197,94,.25)" : "var(--surface2)", border:`1px solid ${isDone ? "rgba(34,197,94,.5)" : "var(--border2)"}`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:7, color:"var(--green)" }}>
+                          {isDone ? "✓" : ""}
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Tool name + result */}
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                        <span style={{ fontSize:12 }}>{meta.icon}</span>
+                        <code style={{ fontSize:11, color: isRunning ? "var(--text)" : isDone ? meta.color : "var(--text3)", fontFamily:"'JetBrains Mono',monospace", fontWeight: isRunning ? 600 : 400 }}>
+                          {meta.label}
+                        </code>
+                        {isRunning && <span style={{ fontSize:10, color:"var(--accent)", opacity:.7 }}>{entry.message || "running…"}</span>}
+                      </div>
+                      {isDone && <ToolSnippet agent={entry.agent} data={entry.result} />}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })}
+
+        <div ref={bottomRef} />
       </div>
     </div>
   );
@@ -172,23 +219,18 @@ function TriageCard({ verdict, summary, isDuplicate }) {
             </div>
           </div>
         </div>
-        {(summary?.ticket_id || notifications.length > 0) && (
-          <div style={{ display:"flex", alignItems:"center", gap:10, flexShrink:0 }}>
-            {summary?.ticket_id && (
-              <a
-                href={`http://localhost:8081/browse/${summary.ticket_id}`}
-                target="_blank" rel="noopener noreferrer"
-                style={{ padding:"5px 12px", background:"rgba(91,106,240,.15)", border:"1px solid rgba(91,106,240,.3)", borderRadius:6, fontSize:12, fontWeight:600, color:"#a5b4fc", fontFamily:"monospace", whiteSpace:"nowrap" }}
-              >
-                {summary.ticket_id}
-              </a>
-            )}
-          </div>
+        {summary?.ticket_id && (
+          <a
+            href={`http://localhost:8081/browse/${summary.ticket_id}`}
+            target="_blank" rel="noopener noreferrer"
+            style={{ padding:"5px 12px", background:"rgba(91,106,240,.15)", border:"1px solid rgba(91,106,240,.3)", borderRadius:6, fontSize:12, fontWeight:600, color:"#a5b4fc", fontFamily:"monospace", whiteSpace:"nowrap" }}
+          >
+            {summary.ticket_id}
+          </a>
         )}
       </div>
 
       <div style={{ padding:"20px" }}>
-        {/* Root cause */}
         {verdict.root_cause_hypothesis && (
           <div style={{ marginBottom:24 }}>
             <div style={{ fontSize:11, fontWeight:700, color:"var(--text3)", textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:8 }}>Root Cause</div>
@@ -196,7 +238,6 @@ function TriageCard({ verdict, summary, isDuplicate }) {
           </div>
         )}
 
-        {/* Investigation steps */}
         {steps.length > 0 && (
           <div style={{ marginBottom:20 }}>
             <div style={{ fontSize:11, fontWeight:700, color:"var(--text3)", textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:12 }}>Investigation Steps</div>
@@ -213,7 +254,6 @@ function TriageCard({ verdict, summary, isDuplicate }) {
           </div>
         )}
 
-        {/* Notifications row */}
         {notifications.length > 0 && (
           <div style={{ display:"flex", gap:16, paddingTop:16, borderTop:"1px solid var(--border)" }}>
             <span style={{ fontSize:11, fontWeight:600, color:"var(--text3)", textTransform:"uppercase", letterSpacing:"0.07em", paddingTop:2 }}>Notified</span>
@@ -299,7 +339,7 @@ function CodeFilesCard({ files }) {
 }
 
 // ── Incident info panel ───────────────────────────────────────────────────────
-function IncidentInfo({ data, connected, pipelineDone, onBack }) {
+function IncidentInfo({ data, pipelineDone, totalIterations, onBack }) {
   if (!data) return null;
   const title = data.title || data.raw_text?.split("\n")[0] || "";
   const desc  = data.raw_text?.includes("\n\n") ? data.raw_text.split("\n\n").slice(1).join("\n\n").trim() : data.description || "";
@@ -308,7 +348,7 @@ function IncidentInfo({ data, connected, pipelineDone, onBack }) {
     <div style={{ background:"var(--surface)", border:"1px solid var(--border)", borderRadius:10, padding:"18px 20px" }}>
       <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", gap:12, marginBottom:16 }}>
         <h2 style={{ fontSize:15, fontWeight:600, lineHeight:1.4, color:"var(--text)" }}>{title}</h2>
-        <button onClick={onBack} style={{ flexShrink:0, padding:"4px 10px", background:"none", border:"1px solid var(--border2)", borderRadius:6, fontSize:12, color:"var(--text3)", transition:"all .15s" }}>← Back</button>
+        <button onClick={onBack} style={{ flexShrink:0, padding:"4px 10px", background:"none", border:"1px solid var(--border2)", borderRadius:6, fontSize:12, color:"var(--text3)" }}>← Back</button>
       </div>
 
       <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
@@ -324,9 +364,14 @@ function IncidentInfo({ data, connected, pipelineDone, onBack }) {
         </div>
       )}
 
-      <div style={{ marginTop:14, paddingTop:12, borderTop:"1px solid var(--border)", display:"flex", alignItems:"center", gap:6 }}>
-        <span style={{ width:7, height:7, borderRadius:"50%", background: pipelineDone ? "var(--green)" : connected ? "var(--green)" : "#fbbf24", display:"inline-block" }} />
-        <span style={{ fontSize:11, color:"var(--text3)" }}>{pipelineDone ? "Completed" : connected ? "Live" : "Connecting…"}</span>
+      <div style={{ marginTop:14, paddingTop:12, borderTop:"1px solid var(--border)", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+        <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+          <span style={{ width:7, height:7, borderRadius:"50%", background: pipelineDone ? "var(--green)" : "#fbbf24", display:"inline-block" }} />
+          <span style={{ fontSize:11, color:"var(--text3)" }}>{pipelineDone ? "Completed" : "Processing…"}</span>
+        </div>
+        {totalIterations && (
+          <span style={{ fontSize:10, color:"var(--text3)", fontFamily:"monospace" }}>{totalIterations} turns</span>
+        )}
       </div>
     </div>
   );
@@ -341,15 +386,41 @@ function Field({ label, children }) {
   );
 }
 
+// ── Tool log reconstruction from pipeline_result ──────────────────────────────
+function buildToolLogFromPR(pr) {
+  const log = [];
+  if (!pr) return log;
+  if (pr.intake && Object.keys(pr.intake).length)
+    log.push({ turn:1, agent:"intake",        status:"done", result:{ ...pr.intake } });
+  if (pr.code_analysis)
+    log.push({ turn:2, agent:"code_analysis", status:"done", result:{ relevant_files:pr.code_analysis.relevant_files||[], degraded:pr.code_analysis.degraded, analysis_summary:pr.code_analysis.analysis_summary } });
+  if (pr.dedup_result)
+    log.push({ turn:2, agent:"dedup",         status:"done", result:{ ...pr.dedup_result } });
+  if (pr.triage_verdict || pr.severity) {
+    const v = pr.triage_verdict || {};
+    log.push({ turn:3, agent:"triage_synth",  status:"done", result:{ severity:v.severity||pr.severity, confidence:v.confidence||pr.confidence, runbook_steps:(v.runbook||pr.runbook||[]).length } });
+  }
+  let t = 4;
+  if (pr.escalation_triggered)
+    log.push({ turn:t++, agent:"escalate", status:"done", result:{ escalated:true, team_paged:pr.suggested_assignee_team||"sre-team" } });
+  if (pr.ticket_id && !pr.is_duplicate)
+    log.push({ turn:t++, agent:"ticket",   status:"done", result:{ ticket_id:pr.ticket_id } });
+  if (pr.notifications_sent?.length)
+    log.push({ turn:t,   agent:"notify",   status:"done", result:{ notifications_sent:pr.notifications_sent } });
+  return log;
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 export default function TriageView({ incidentId, onBack }) {
-  const { messages, connected } = useWebSocket(incidentId);
-  const [incidentData, setIncidentData] = useState(null);
-  const [loading, setLoading]   = useState(true);
-  const [agentState, setAgentState] = useState({});
-  const [pipelineDone, setPipelineDone] = useState(false);
-  const [summary, setSummary]   = useState(null);
+  const { messages } = useWebSocket(incidentId);
+  const [incidentData,  setIncidentData]  = useState(null);
+  const [loading,       setLoading]       = useState(true);
+  const [toolLog,       setToolLog]       = useState([]);
+  const [agentState,    setAgentState]    = useState({});
+  const [pipelineDone,  setPipelineDone]  = useState(false);
+  const [summary,       setSummary]       = useState(null);
 
+  // ── Load incident + reconstruct from pipeline_result ─────────────────────
   useEffect(() => {
     fetch(`/api/incidents/${incidentId}`)
       .then(r => r.ok ? r.json() : Promise.reject())
@@ -358,38 +429,62 @@ export default function TriageView({ incidentId, onBack }) {
         setLoading(false);
         const pr = d.pipeline_result;
         if (!pr) return;
-        const newState = {};
-        if (pr.intake && Object.keys(pr.intake).length)
-          newState.intake = { status:"done", result:{ title:pr.intake.title, affected_service:pr.intake.affected_service, error_type:pr.intake.error_type, information_sufficient:pr.intake.information_sufficient }};
+
+        // Reconstruct agent state for TriageCard etc.
+        const ns = {};
+        if (pr.intake)
+          ns.intake = { status:"done", result:pr.intake };
         if (pr.code_analysis)
-          newState.code_analysis = { status:"done", result:{ relevant_files:pr.code_analysis.relevant_files||[], summary:pr.code_analysis.analysis_summary, degraded:pr.code_analysis.degraded }};
+          ns.code_analysis = { status:"done", result:{ relevant_files:pr.code_analysis.relevant_files||[], degraded:pr.code_analysis.degraded }};
         if (pr.dedup_result)
-          newState.dedup = { status:"done", result:{ is_duplicate:pr.dedup_result.is_duplicate, highest_similarity:pr.dedup_result.highest_similarity, recommendation:pr.dedup_result.recommendation, linked_incident_id:pr.dedup_result.linked_incident_id }};
-        if (pr.triage_verdict)
-          newState.triage_synth = { status:"done", result:{ severity:pr.triage_verdict.severity, confidence:pr.triage_verdict.confidence, root_cause_hypothesis:pr.triage_verdict.root_cause_hypothesis, investigation_steps:pr.triage_verdict.investigation_steps, runbook:pr.triage_verdict.runbook||pr.runbook||[], suggested_assignee_team:pr.triage_verdict.suggested_assignee_team||pr.suggested_assignee_team||"sre-team", needs_human_review:pr.triage_verdict.needs_human_review }};
-        if (pr.ticket_id)
-          newState.ticket = { status:"done", result:{ ticket_id:pr.ticket_id, ticket_url:pr.ticket_url }};
-        if (pr.notifications_sent)
-          newState.notify = { status:"done", result:{ notifications_sent:pr.notifications_sent }};
-        if (Object.keys(newState).length) {
-          setAgentState(prev => ({ ...prev, ...newState }));
-          setPipelineDone(true);
-          setSummary(pr);
+          ns.dedup = { status:"done", result:pr.dedup_result };
+        if (pr.triage_verdict || pr.severity) {
+          const v = pr.triage_verdict || {};
+          ns.triage_synth = { status:"done", result:{ severity:v.severity||pr.severity, confidence:v.confidence||pr.confidence, root_cause_hypothesis:v.root_cause_hypothesis||pr.root_cause_hypothesis, investigation_steps:v.investigation_steps||pr.investigation_steps||[], runbook:v.runbook||pr.runbook||[], suggested_assignee_team:v.suggested_assignee_team||pr.suggested_assignee_team||"sre-team", needs_human_review:v.needs_human_review||pr.needs_human_review }};
         }
+        if (pr.ticket_id)
+          ns.ticket = { status:"done", result:{ ticket_id:pr.ticket_id } };
+        if (pr.notifications_sent)
+          ns.notify = { status:"done", result:{ notifications_sent:pr.notifications_sent }};
+
+        setAgentState(ns);
+        setSummary(pr);
+        setPipelineDone(true);
+        setToolLog(buildToolLogFromPR(pr));
       })
       .catch(() => setLoading(false));
   }, [incidentId]);
 
+  // ── Live WS messages → update toolLog + agentState ───────────────────────
   useEffect(() => {
     if (!messages.length) return;
-    const { phase, agent, data = {} } = messages[messages.length - 1];
-    const id = agent === "run_code_analysis" ? "code_analysis" : agent === "escalate" ? "escalate" : agent;
-    if (phase === "agent_started")
-      setAgentState(p => ({ ...p, [id]:{ status:"running", result:null } }));
-    else if (phase === "agent_completed")
-      setAgentState(p => ({ ...p, [id]:{ status:"done", result:data } }));
-    else if (phase === "pipeline_completed") { setPipelineDone(true); setSummary(data); }
-    else if (phase === "pipeline_failed") setPipelineDone(true);
+    const msg = messages[messages.length - 1];
+    const { phase, agent, data = {} } = msg;
+    const turn = data.turn || 1;
+
+    if (phase === "agent_started") {
+      setToolLog(prev => {
+        const exists = prev.find(e => e.turn === turn && e.agent === agent);
+        if (exists) return prev.map(e => e.turn===turn && e.agent===agent ? {...e, status:"running", message:data.message} : e);
+        return [...prev, { turn, agent, status:"running", message:data.message, result:null, parallel:data.parallel }];
+      });
+      setAgentState(p => ({ ...p, [agent]:{ status:"running", result:null } }));
+    }
+    else if (phase === "agent_completed") {
+      setToolLog(prev => prev.map(e =>
+        e.turn === turn && e.agent === agent ? { ...e, status:"done", result:data } : e
+      ));
+      setAgentState(p => ({ ...p, [agent]:{ status:"done", result:data } }));
+    }
+    else if (phase === "pipeline_completed") {
+      setPipelineDone(true);
+      setSummary(data);
+      // Backfill any missing entries from summary
+      setToolLog(prev => prev.length > 0 ? prev : buildToolLogFromPR(data));
+    }
+    else if (phase === "pipeline_failed") {
+      setPipelineDone(true);
+    }
   }, [messages]);
 
   if (loading) return (
@@ -406,13 +501,25 @@ export default function TriageView({ incidentId, onBack }) {
   const runbook      = verdict?.runbook || summary?.runbook || [];
   const assigneeTeam = verdict?.suggested_assignee_team || summary?.suggested_assignee_team || "";
   const escalation   = summary?.escalation_triggered || false;
+  const totalIters   = summary?.iterations || null;
 
   return (
-    <div style={{ display:"grid", gridTemplateColumns:"300px 1fr", gap:20, alignItems:"start" }}>
+    <div style={{ display:"grid", gridTemplateColumns:"320px 1fr", gap:20, alignItems:"start" }}>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+
       {/* Left column */}
       <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
-        <IncidentInfo data={incidentData} connected={connected} pipelineDone={pipelineDone} onBack={onBack} />
-        <PipelinePanel agentState={agentState} />
+        <IncidentInfo
+          data={incidentData}
+          pipelineDone={pipelineDone}
+          totalIterations={totalIters}
+          onBack={onBack}
+        />
+        <ReactLog
+          toolLog={toolLog}
+          pipelineDone={pipelineDone}
+          totalIterations={totalIters}
+        />
       </div>
 
       {/* Right column */}
@@ -422,10 +529,9 @@ export default function TriageView({ incidentId, onBack }) {
         )}
         {!pipelineDone && (
           <div style={{ background:"var(--surface)", border:"1px solid var(--border)", borderRadius:10, padding:"40px 24px", textAlign:"center", color:"var(--text3)" }}>
-            <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
             <div style={{ width:28, height:28, border:"2px solid var(--border2)", borderTopColor:"var(--accent)", borderRadius:"50%", animation:"spin .6s linear infinite", margin:"0 auto 16px" }} />
-            <div style={{ fontSize:14, color:"var(--text2)" }}>Analyzing incident…</div>
-            <div style={{ fontSize:12, marginTop:4 }}>Results will appear here as agents complete</div>
+            <div style={{ fontSize:14, color:"var(--text2)" }}>Claude is reasoning…</div>
+            <div style={{ fontSize:12, marginTop:4 }}>Tool calls will appear on the left as they execute</div>
           </div>
         )}
         {pipelineDone && runbook.length > 0 && (

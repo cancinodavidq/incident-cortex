@@ -373,6 +373,8 @@ async def run_incident_pipeline(
                 agent_id = TOOL_TO_AGENT_ID.get(tu.name, tu.name)
                 await emit("agent_started", agent_id, {
                     "message": TOOL_START_MSG.get(tu.name, f"Running {tu.name}..."),
+                    "turn": iteration + 1,
+                    "parallel": len(tool_uses) > 1,
                     "inputs": tu.input,
                 })
 
@@ -395,7 +397,11 @@ async def run_incident_pipeline(
             tool_result_blocks = []
             for (tu_id, name, result, err) in tool_results_raw:
                 agent_id = TOOL_TO_AGENT_ID.get(name, name)
-                await emit("agent_completed", agent_id, result)
+                await emit("agent_completed", agent_id, {
+                    **result,
+                    "turn": iteration + 1,
+                    "parallel": len(tool_uses) > 1,
+                })
 
                 tool_result_blocks.append({
                     "type": "tool_result",

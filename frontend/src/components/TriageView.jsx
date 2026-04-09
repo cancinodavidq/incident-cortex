@@ -10,14 +10,18 @@ const SEV = {
 };
 
 const TOOL_META = {
-  intake:        { icon:"🔍", label:"parse_incident",     color:"#a5b4fc" },
-  code_analysis: { icon:"💻", label:"search_codebase",    color:"#86efac" },
-  dedup:         { icon:"🔁", label:"check_duplicates",   color:"#86efac" },
-  triage_synth:  { icon:"⚙️", label:"synthesize_triage",  color:"#fcd34d" },
-  escalate:      { icon:"🚨", label:"escalate_p1",        color:"#fca5a5" },
-  ticket:        { icon:"🎫", label:"create_ticket",      color:"#a5b4fc" },
-  notify:        { icon:"📣", label:"send_notifications", color:"#fdba74" },
+  intake:        { icon:"🔍", label:"parse_incident",     color:"#a5b4fc", skill:false },
+  code_analysis: { icon:"💻", label:"search_codebase",    color:"#86efac", skill:false },
+  dedup:         { icon:"🔁", label:"check_duplicates",   color:"#86efac", skill:false },
+  metrics:       { icon:"📊", label:"query_metrics",      color:"#c4b5fd", skill:true  },
+  triage_synth:  { icon:"⚙️", label:"synthesize_triage",  color:"#fcd34d", skill:false },
+  escalate:      { icon:"🚨", label:"escalate_p1",        color:"#fca5a5", skill:false },
+  ticket:        { icon:"🎫", label:"create_ticket",      color:"#a5b4fc", skill:false },
+  notify:        { icon:"📣", label:"send_notifications", color:"#fdba74", skill:false },
 };
+
+// All tools in canonical pipeline order (for the "used / skipped" overview)
+const ALL_TOOLS = ["intake","code_analysis","dedup","metrics","triage_synth","escalate","ticket","notify"];
 
 function cleanStep(s) { return s.replace(/^\d+\.\d*\s*/, "").replace(/^[-•]\s*/, "").trim(); }
 
@@ -43,6 +47,15 @@ function ToolSnippet({ agent, data }) {
     return <span style={{...st, color: data.is_duplicate ? "#fcd34d" : "#86efac"}}>
       {data.is_duplicate ? `duplicate · ${sim}% match` : `new · ${sim}% max sim`}
     </span>;
+  }
+  if (agent === "metrics") {
+    const anomaly = data.anomaly_detected;
+    return (
+      <span style={{ ...st, color: anomaly ? "#fca5a5" : "#86efac" }}>
+        {data.service} · err {Math.round((data.error_rate||0)*100)}% · p95 {data.p95_latency_ms}ms
+        {anomaly ? " · ⚠ anomaly" : " · ✓ normal"}
+      </span>
+    );
   }
   if (agent === "triage_synth") {
     if (!data.severity) return <span style={st}>skipped (duplicate)</span>;
@@ -72,6 +85,56 @@ function Spinner({ size=10 }) {
       <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
       <span style={{ width:size, height:size, border:`1.5px solid rgba(91,106,240,.3)`, borderTopColor:"var(--accent)", borderRadius:"50%", display:"inline-block", animation:"spin .6s linear infinite", flexShrink:0 }} />
     </>
+  );
+}
+
+// ── Tool overview row (used vs skipped) ──────────────────────────────────────
+function ToolOverview({ toolLog, pipelineDone }) {
+  const usedAgents = new Set(toolLog.filter(e => e.status === "done").map(e => e.agent));
+  const runningAgents = new Set(toolLog.filter(e => e.status === "running").map(e => e.agent));
+
+  return (
+    <div style={{ padding:"10px 14px", borderBottom:"1px solid var(--border)", display:"flex", flexWrap:"wrap", gap:6 }}>
+      {ALL_TOOLS.map(agentId => {
+        const meta = TOOL_META[agentId];
+        const used    = usedAgents.has(agentId);
+        const running = runningAgents.has(agentId);
+        const pending = !used && !running;
+
+        let bg, border, textColor, dotColor;
+        if (running) {
+          bg = "rgba(91,106,240,.12)"; border = "rgba(91,106,240,.3)";
+          textColor = "#a5b4fc"; dotColor = "var(--accent)";
+        } else if (used) {
+          bg = "rgba(34,197,94,.07)"; border = "rgba(34,197,94,.25)";
+          textColor = meta.color; dotColor = "#22c55e";
+        } else {
+          bg = "transparent"; border = "var(--border)";
+          textColor = "var(--text3)"; dotColor = "var(--border2)";
+        }
+
+        return (
+          <div key={agentId} style={{
+            display:"inline-flex", alignItems:"center", gap:5,
+            padding:"3px 8px", borderRadius:5,
+            background:bg, border:`1px solid ${border}`,
+            opacity: pending && pipelineDone ? 0.45 : 1,
+            transition:"all .3s",
+          }}>
+            {running
+              ? <Spinner size={8} />
+              : <span style={{ width:6, height:6, borderRadius:"50%", background:dotColor, display:"inline-block", flexShrink:0 }} />
+            }
+            <span style={{ fontSize:10, fontFamily:"'JetBrains Mono',monospace", color:textColor, whiteSpace:"nowrap" }}>
+              {meta.label}
+            </span>
+            {meta.skill && (
+              <span style={{ fontSize:8, padding:"0 3px", background:"rgba(196,181,253,.15)", border:"1px solid rgba(196,181,253,.3)", borderRadius:2, color:"#c4b5fd", fontWeight:700, letterSpacing:"0.04em" }}>SKILL</span>
+            )}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -118,6 +181,9 @@ function ReactLog({ toolLog, pipelineDone, totalIterations }) {
           )}
         </div>
       </div>
+
+      {/* Tool overview: used vs skipped */}
+      <ToolOverview toolLog={toolLog} pipelineDone={pipelineDone} />
 
       {/* Log body */}
       <div style={{ padding:"8px 0", maxHeight:420, overflowY:"auto", fontSize:12 }}>
@@ -396,6 +462,8 @@ function buildToolLogFromPR(pr) {
     log.push({ turn:2, agent:"code_analysis", status:"done", result:{ relevant_files:pr.code_analysis.relevant_files||[], degraded:pr.code_analysis.degraded, analysis_summary:pr.code_analysis.analysis_summary } });
   if (pr.dedup_result)
     log.push({ turn:2, agent:"dedup",         status:"done", result:{ ...pr.dedup_result } });
+  if (pr.metrics_result && Object.keys(pr.metrics_result).length)
+    log.push({ turn:2, agent:"metrics",       status:"done", result:{ ...pr.metrics_result } });
   if (pr.triage_verdict || pr.severity) {
     const v = pr.triage_verdict || {};
     log.push({ turn:3, agent:"triage_synth",  status:"done", result:{ severity:v.severity||pr.severity, confidence:v.confidence||pr.confidence, runbook_steps:(v.runbook||pr.runbook||[]).length } });
@@ -442,6 +510,8 @@ export default function TriageView({ incidentId, onBack }) {
           const v = pr.triage_verdict || {};
           ns.triage_synth = { status:"done", result:{ severity:v.severity||pr.severity, confidence:v.confidence||pr.confidence, root_cause_hypothesis:v.root_cause_hypothesis||pr.root_cause_hypothesis, investigation_steps:v.investigation_steps||pr.investigation_steps||[], runbook:v.runbook||pr.runbook||[], suggested_assignee_team:v.suggested_assignee_team||pr.suggested_assignee_team||"sre-team", needs_human_review:v.needs_human_review||pr.needs_human_review }};
         }
+        if (pr.metrics_result && Object.keys(pr.metrics_result).length)
+          ns.metrics = { status:"done", result:{ ...pr.metrics_result } };
         if (pr.ticket_id)
           ns.ticket = { status:"done", result:{ ticket_id:pr.ticket_id } };
         if (pr.notifications_sent)

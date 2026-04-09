@@ -135,6 +135,30 @@ TOOLS = [
             "properties": {},
             "required": []
         }
+    },
+    {
+        "name": "query_metrics",
+        "description": (
+            "[SKILL] Query real-time service metrics for the affected service: error rate, "
+            "request latency (p50/p95), memory usage, and anomaly detection. "
+            "Call this in parallel with search_codebase and check_duplicates to enrich triage "
+            "with live observability data. Skip if the service name is unknown."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "service": {
+                    "type": "string",
+                    "description": "Name of the affected service (e.g. checkout, payment, auth)"
+                },
+                "window_minutes": {
+                    "type": "integer",
+                    "description": "Look-back window in minutes (default: 30)",
+                    "default": 30
+                }
+            },
+            "required": ["service"]
+        }
     }
 ]
 
@@ -143,11 +167,14 @@ and must investigate it thoroughly using the available tools.
 
 REQUIRED workflow:
 1. parse_incident — always first
-2. search_codebase AND check_duplicates — call both simultaneously in a single turn
+2. search_codebase AND check_duplicates AND query_metrics — call all three simultaneously in a single turn
 3. synthesize_triage — produce severity, root cause, runbook
 4. If severity is P1: call escalate_p1 before create_ticket
 5. If NOT a duplicate: call create_ticket
 6. send_notifications — always last
+
+query_metrics is a SKILL that provides live observability data (error rate, latency, anomalies).
+Always call it in step 2 alongside the other parallel tools — it enriches the triage verdict.
 
 Be decisive. Do not ask clarifying questions. Use all tools in sequence.
 When you can call multiple tools simultaneously (step 2), do so in a single response."""
@@ -225,6 +252,49 @@ async def _handle_send_notifications(inputs: dict, state: dict) -> dict:
     return {"notifications_sent": result.get("notifications_sent", [])}
 
 
+async def _handle_query_metrics(inputs: dict, state: dict) -> dict:
+    """
+    [SKILL] Simulate querying Prometheus/Grafana metrics for the affected service.
+    Returns error rate, latency percentiles, memory usage, and anomaly flag.
+    In production this would call a real metrics API.
+    """
+    import random, math
+
+    service = inputs.get("service", "unknown").lower()
+    window  = inputs.get("window_minutes", 30)
+
+    # Seed by service name so results are consistent per service within a pipeline run
+    rng = random.Random(hash(service + state.get("incident_id", "")))
+
+    # Simulate degraded metrics correlated with the incident
+    parsed = state.get("parsed_incident") or {}
+    is_critical = any(w in str(parsed).lower() for w in ["timeout", "500", "crash", "down", "unavailable"])
+
+    base_error_rate = rng.uniform(0.15, 0.45) if is_critical else rng.uniform(0.01, 0.08)
+    p50 = rng.randint(180, 600) if is_critical else rng.randint(40, 180)
+    p95 = int(p50 * rng.uniform(2.5, 5.0))
+    memory_pct = rng.randint(72, 95) if is_critical else rng.randint(40, 70)
+    anomaly = base_error_rate > 0.10 or p95 > 1000 or memory_pct > 85
+
+    result = {
+        "service": service,
+        "window_minutes": window,
+        "error_rate": round(base_error_rate, 4),
+        "p50_latency_ms": p50,
+        "p95_latency_ms": p95,
+        "memory_usage_pct": memory_pct,
+        "anomaly_detected": anomaly,
+        "metric_summary": (
+            f"{service}: error_rate={base_error_rate:.1%}, "
+            f"p50={p50}ms, p95={p95}ms, mem={memory_pct}% "
+            f"{'⚠ ANOMALY' if anomaly else '✓ normal'}"
+        ),
+    }
+    state["metrics_result"] = result
+    logger.info(f"Metrics for {service}: {result['metric_summary']}")
+    return result
+
+
 TOOL_HANDLERS: dict[str, Any] = {
     "parse_incident":     _handle_parse_incident,
     "search_codebase":    _handle_search_codebase,
@@ -233,6 +303,7 @@ TOOL_HANDLERS: dict[str, Any] = {
     "escalate_p1":        _handle_escalate_p1,
     "create_ticket":      _handle_create_ticket,
     "send_notifications": _handle_send_notifications,
+    "query_metrics":      _handle_query_metrics,
 }
 
 # Map tool name → WS agent id (for UI pipeline panel)
@@ -244,6 +315,7 @@ TOOL_TO_AGENT_ID = {
     "escalate_p1":        "escalate",
     "create_ticket":      "ticket",
     "send_notifications": "notify",
+    "query_metrics":      "metrics",
 }
 
 TOOL_START_MSG = {
@@ -254,6 +326,7 @@ TOOL_START_MSG = {
     "escalate_p1":        "P1 detected — triggering escalation...",
     "create_ticket":      "Creating Jira ticket...",
     "send_notifications": "Sending email and Slack notifications...",
+    "query_metrics":      "Querying service metrics (error rate, latency)...",
 }
 
 
@@ -438,10 +511,11 @@ async def run_incident_pipeline(
             "relevant_files":       code_a.get("relevant_files", []),
             "iterations":           iteration + 1,
             # Full agent outputs for UI reconstruction
-            "intake":        state.get("parsed_incident") or {},
-            "code_analysis": code_a,
-            "dedup_result":  dedup,
-            "triage_verdict": verdict,
+            "intake":          state.get("parsed_incident") or {},
+            "code_analysis":   code_a,
+            "dedup_result":    dedup,
+            "triage_verdict":  verdict,
+            "metrics_result":  state.get("metrics_result") or {},
         }
 
         await event_store.save_pipeline_result(incident_id, pipeline_summary)

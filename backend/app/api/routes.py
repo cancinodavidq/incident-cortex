@@ -22,7 +22,9 @@ rate_limit_store: dict[str, list[tuple[float, int]]] = {}
 RATE_LIMIT_INCIDENTS_PER_MINUTE = 10
 
 # Allowed file types and max size
-ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "txt", "log", "csv"}
+ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "txt", "log", "csv", "yaml", "yml", "json"}
+IMAGE_EXTENSIONS    = {"png", "jpg", "jpeg", "gif"}
+TEXT_EXTENSIONS     = {"txt", "log", "csv", "yaml", "yml", "json"}
 MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10MB
 
 
@@ -142,19 +144,37 @@ async def submit_incident(
             detail="Malicious input detected in title or description"
         )
 
-    # Validate files
+    # Validate and process files
     uploaded_files = []
     if files:
         for file in files:
-            if file.filename:
-                file_content = await file.read()
-                is_valid, error_msg = validate_file(file.filename, len(file_content))
-                if not is_valid:
-                    raise HTTPException(status_code=400, detail=error_msg)
+            if not file.filename:
+                continue
+            file_content = await file.read()
+            is_valid, error_msg = validate_file(file.filename, len(file_content))
+            if not is_valid:
+                raise HTTPException(status_code=400, detail=error_msg)
+
+            ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
+            if ext in IMAGE_EXTENSIONS:
+                import base64
                 uploaded_files.append({
                     "filename": file.filename,
-                    "content": file_content,
-                    "size": len(file_content)
+                    "type": "image",
+                    "media_type": file.content_type or f"image/{ext}",
+                    "data": base64.b64encode(file_content).decode(),
+                    "size": len(file_content),
+                })
+            else:
+                try:
+                    text = file_content.decode("utf-8", errors="replace")
+                except Exception:
+                    text = file_content.decode("latin-1", errors="replace")
+                uploaded_files.append({
+                    "filename": file.filename,
+                    "type": "text",
+                    "content": text,
+                    "size": len(file_content),
                 })
 
     # Prepare incident data
@@ -173,7 +193,7 @@ async def submit_incident(
         "title": title,
         "description": description,
         "reporter_email": reporter_email,
-        "files": uploaded_files,
+        "attachments": uploaded_files,
         "created_at": datetime.utcnow().isoformat()
     }
 

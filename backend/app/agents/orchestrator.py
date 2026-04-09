@@ -399,19 +399,43 @@ async def run_incident_pipeline(
 
     client = anthropic_sdk.Anthropic(api_key=settings.anthropic_api_key)
 
-    # ── initial message ───────────────────────────────────────────────────────
-    messages = [
-        {
-            "role": "user",
-            "content": (
-                f"Triage this incident:\n\n"
-                f"Title: {incident_data.get('title', '')}\n"
-                f"Description: {incident_data.get('description', '') or incident_data.get('raw_text', '')}\n"
-                f"Reporter: {incident_data.get('reporter_email', '')}\n"
-                f"Incident ID: {incident_id}"
-            )
-        }
-    ]
+    # ── initial message (with optional attachments) ───────────────────────────
+    attachments = incident_data.get("attachments") or []
+    base_text = (
+        f"Triage this incident:\n\n"
+        f"Title: {incident_data.get('title', '')}\n"
+        f"Description: {incident_data.get('description', '') or incident_data.get('raw_text', '')}\n"
+        f"Reporter: {incident_data.get('reporter_email', '')}\n"
+        f"Incident ID: {incident_id}"
+    )
+
+    # Build content blocks — text first, then attachments
+    content_blocks: list = [{"type": "text", "text": base_text}]
+
+    for att in attachments:
+        if att.get("type") == "image":
+            content_blocks.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": att.get("media_type", "image/png"),
+                    "data": att["data"],
+                }
+            })
+            content_blocks.append({
+                "type": "text",
+                "text": f"[Attached image: {att['filename']}]"
+            })
+        elif att.get("type") == "text":
+            content_blocks.append({
+                "type": "text",
+                "text": f"\n---\nAttached file: {att['filename']}\n```\n{att['content'][:8000]}\n```"
+            })
+
+    if attachments:
+        logger.info(f"Incident {incident_id}: {len(attachments)} attachment(s) included in context")
+
+    messages = [{"role": "user", "content": content_blocks}]
 
     MAX_ITERATIONS = 15
     loop = asyncio.get_event_loop()

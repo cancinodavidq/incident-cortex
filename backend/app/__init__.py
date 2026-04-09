@@ -1,0 +1,1 @@
+"""Incident Cortex backend application."""

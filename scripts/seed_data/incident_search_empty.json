@@ -1,0 +1,48 @@
+{
+  "id": "incident_002",
+  "title": "Product Search Returning Empty Results",
+  "description": "Product search is broken. All search queries return 0 results regardless of search term. The search bar is functional (accepts input), but results are always empty. Started after last deployment 2 hours ago. Elasticsearch logs show query errors. Error: \"No active connection to Elasticsearch cluster\". Affects all users on the storefront. Customer complaints coming in rapidly.",
+  "reporter_email": "reporter2@ecommerce.com",
+  "status": "completed",
+  "created_at": "2026-04-09T00:15:00Z",
+  "triage_verdict": {
+    "severity": "P2",
+    "severity_reasoning": "Major user-facing functionality broken, Elasticsearch connectivity issue, affects search experience but not checkout",
+    "confidence": 0.92,
+    "root_cause_hypothesis": "Elasticsearch cluster connection lost after deployment, possible network or credential change",
+    "needs_human_review": false
+  },
+  "relevant_files": [
+    {
+      "file_path": "src/plugins/search-elasticsearch/client.js",
+      "relevance_score": 0.96,
+      "reason": "Elasticsearch connection and query logic"
+    },
+    {
+      "file_path": "src/plugins/search-elasticsearch/config.js",
+      "relevance_score": 0.88,
+      "reason": "Connection configuration and credentials"
+    },
+    {
+      "file_path": "src/api/graphql/queries/searchProducts.graphql",
+      "relevance_score": 0.75,
+      "reason": "GraphQL search query interface"
+    },
+    {
+      "file_path": "src/plugins/search-elasticsearch/index.js",
+      "relevance_score": 0.82,
+      "reason": "Indexing and search API endpoint"
+    }
+  ],
+  "recommended_actions": [
+    "Check Elasticsearch connection parameters in deployment config",
+    "Verify Elasticsearch cluster health and status",
+    "Check recent commits to search-elasticsearch plugin",
+    "Review deployment logs from 2 hours ago"
+  ],
+  "ticket_id": "JIRA-101",
+  "notifications_sent": [
+    "slack:#incidents",
+    "email:reporter2@ecommerce.com"
+  ]
+}

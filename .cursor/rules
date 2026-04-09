@@ -1,0 +1,95 @@
+# Cursor Rules — Incident Cortex
+
+## Project Overview
+6-agent LangGraph pipeline (FastAPI backend + React frontend) that triages SRE incidents end-to-end.
+All services run in Docker. Backend hot-reloads on file save. Frontend hot-reloads via CRA dev server.
+
+## Architecture Quick Reference
+
+- **Entry point**: `backend/app/main.py`
+- **Agent pipeline**: `backend/app/agents/orchestrator.py` — StateGraph definition
+- **Agent state**: `backend/app/models/incident.py` — IncidentState TypedDict
+- **Agent files**: `backend/app/agents/{intake,code_analysis,deduplication,triage_synth,ticket_agent,notification}.py`
+- **Services**: `backend/app/services/{event_store,vector_store,llm_client}.py`
+- **API routes**: `backend/app/api/routes.py` (REST) + `websocket.py` (WS)
+- **Frontend**: `frontend/src/components/{TriageView,IncidentForm,IncidentList,MetricsDashboard}.jsx`
+- **Mocks**: `mock-services/{jira-mock,slack-mock}/app.py` (FastAPI + SQLite)
+
+## Coding Conventions
+
+### Backend (Python)
+- All agents are async functions returning `dict` that merges into `IncidentState`
+- Never `await` sync methods: `VectorStore.query()`, `VectorStore.file_exists()` are synchronous
+- Use `state.get("field") or {}` (not `state.get("field", {})`) for optional dicts — avoids None crashes
+- ChromaDB: never pass `where={}`, only pass `where=` when the filter is truthy
+- LLM calls: always use `LLMClient.call(system_prompt, user_prompt)` — handles retries + Langfuse
+- After LLM response: use `LLMClient.extract_json(response)` before `json.loads()`
+- Settings: use `get_settings()` not `Settings()` directly (cached singleton)
+- EventStore: use `await event_store.log_event(incident_id, event_type, data)` — accepts str or UUID
+
+### Frontend (React + JSX)
+- No TypeScript — pure JSX
+- Inline styles only using CSS custom properties (no Tailwind, no CSS modules)
+- Design tokens: `var(--bg)`, `var(--surface)`, `var(--surface2)`, `var(--border)`, `var(--border2)`,
+  `var(--text)`, `var(--text2)`, `var(--text3)`, `var(--accent)`, `var(--green)`, `var(--red)`
+- Font stack: `'Inter', sans-serif` for UI, `'JetBrains Mono', monospace` for code
+- WebSocket: connect directly to `ws://localhost:8000/ws/{incidentId}` — DO NOT use frontend port
+  (CRA dev proxy does not forward WebSocket upgrades)
+- API calls: use relative paths `/api/...` — proxied by CRA to backend:8000
+
+## Agent Development Rules
+
+### Adding a new agent
+1. Create `backend/app/agents/my_agent.py` with `async def my_agent(state: IncidentState) -> dict`
+2. Add it to `orchestrator.py`: `graph.add_node("my_agent", my_agent_node)`
+3. Wire edges and conditional routing in `build_graph()`
+4. Add the new state fields to `IncidentState` in `models/incident.py`
+5. Include output in `pipeline_summary` in `run_incident_pipeline()`
+6. Add an entry to `AGENTS.md`
+
+### Modifying routing logic
+- Routing functions (`_route_after_triage`, `_route_intake`) must return string keys
+  matching the second argument of `add_conditional_edges()`
+- LangGraph `Send()` for parallel dispatch: `return [Send("node_a", state), Send("node_b", state)]`
+
+### LLM prompts
+- Always ask for JSON output and use `LLMClient.extract_json()` to strip markdown fences
+- Provide a conservative fallback `TriageVerdict` on parse errors (P3, confidence=0.5, needs_human_review=True)
+- For structured outputs with nested models, validate with Pydantic before returning
+
+## Running & Testing
+
+```bash
+# Watch backend logs
+docker compose logs backend -f
+
+# Watch frontend build
+docker compose logs frontend -f
+
+# Run backend tests
+docker compose exec backend pytest tests/ -v
+
+# Submit test incident via API
+curl -X POST http://localhost:8000/api/incidents \
+  -F "title=Test" -F "description=DB timeout in prod" -F "reporter_email=test@co.com"
+
+# Check metrics
+curl http://localhost:8000/api/metrics | jq
+
+# Access services
+# UI: http://localhost:3000
+# API docs: http://localhost:8000/docs
+# MailHog: http://localhost:8025
+# Jira: http://localhost:8081
+# Slack: http://localhost:8090
+# Langfuse: http://localhost:3001
+```
+
+## Common Pitfalls
+
+1. **ChromaDB `where={}` error** — always check `if where_filter:` before passing to query
+2. **`await` on sync VectorStore methods** — `query()`, `file_exists()`, `expand_context()` are sync
+3. **WebSocket from wrong port** — browser must connect to `ws://localhost:8000/ws/...` not `:3000`
+4. **`pipeline_result` not saved** — check `save_pipeline_result()` in EventStore; UI relies on it for load
+5. **P1 routing** — verify `_route_after_triage` returns `"escalate"` for P1 before ticket creation
+6. **Indexer not done** — `GET /health` shows `indexing_complete: false`; code_analysis returns empty until complete

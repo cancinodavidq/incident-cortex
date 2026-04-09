@@ -31,7 +31,7 @@ const PHASE_STYLE = {
   default:   { background:"rgba(91,106,240,.12)", color:"#a5b4fc" },
 };
 
-export default function IncidentList({ onSelect }) {
+export default function IncidentList({ onSelect, onNew }) {
   const [incidents, setIncidents] = useState([]);
   const [loading, setLoading]     = useState(true);
   const [error, setError]         = useState(null);
@@ -74,7 +74,17 @@ export default function IncidentList({ onSelect }) {
           <div style={s.title}>Incidents</div>
           <div style={s.sub}>{incidents.length} total</div>
         </div>
-        <button style={s.btn} onClick={load}>↻ Refresh</button>
+        <div style={{ display:"flex", gap:8 }}>
+          {onNew && (
+            <button
+              style={{ ...s.btn, background:"#000", border:"1px solid #333", color:"#fff", fontWeight:600, cursor:"pointer" }}
+              onClick={onNew}
+            >
+              + New Incident
+            </button>
+          )}
+          <button style={{ ...s.btn, cursor:"pointer" }} onClick={load}>↻ Refresh</button>
+        </div>
       </div>
 
       <div style={s.card}>

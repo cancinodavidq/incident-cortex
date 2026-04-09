@@ -139,24 +139,31 @@ function ToolOverview({ toolLog, pipelineDone }) {
 }
 
 // ── ReAct log panel ───────────────────────────────────────────────────────────
-function ReactLog({ toolLog, pipelineDone, totalIterations }) {
+function ReactLog({ toolLog, reasoningLog, pipelineDone, totalIterations }) {
   const bottomRef = useRef(null);
 
   useEffect(() => {
     if (bottomRef.current) bottomRef.current.scrollIntoView({ behavior:"smooth" });
-  }, [toolLog]);
+  }, [toolLog, reasoningLog]);
 
-  // Group by turn
+  // Group tools by turn
   const turnMap = {};
   for (const entry of toolLog) {
     const t = entry.turn || 1;
     if (!turnMap[t]) turnMap[t] = [];
     turnMap[t].push(entry);
   }
-  const turns = Object.keys(turnMap)
-    .map(Number)
-    .sort((a,b) => a-b)
-    .map(t => ({ turn:t, tools:turnMap[t] }));
+  // Build reasoning index by turn
+  const reasoningByTurn = {};
+  for (const r of reasoningLog) reasoningByTurn[r.turn] = r.text;
+
+  // All turns that have either tools or reasoning
+  const allTurnNums = new Set([
+    ...Object.keys(turnMap).map(Number),
+    ...reasoningLog.map(r => r.turn),
+  ]);
+  const turns = [...allTurnNums].sort((a,b) => a-b)
+    .map(t => ({ turn:t, tools: turnMap[t] || [], reasoning: reasoningByTurn[t] || null }));
 
   const maxTurn = turns.length ? Math.max(...turns.map(t=>t.turn)) : 0;
   const hasRunning = toolLog.some(e => e.status === "running");
@@ -194,7 +201,7 @@ function ReactLog({ toolLog, pipelineDone, totalIterations }) {
           </div>
         )}
 
-        {turns.map(({ turn, tools }) => {
+        {turns.map(({ turn, tools, reasoning }) => {
           const isParallel = tools.length > 1;
           const allDone    = tools.every(t => t.status === "done");
           const anyRunning = tools.some(t => t.status === "running");
@@ -214,6 +221,15 @@ function ReactLog({ toolLog, pipelineDone, totalIterations }) {
                   <span style={{ fontSize:9, color:"#86efac", opacity:.7 }}>✓</span>
                 )}
               </div>
+
+              {/* Claude's reasoning for this turn */}
+              {reasoning && (
+                <div style={{ margin:"4px 14px 6px 32px", padding:"6px 10px", background:"rgba(91,106,240,.05)", borderLeft:"2px solid rgba(91,106,240,.25)", borderRadius:"0 4px 4px 0" }}>
+                  <span style={{ fontSize:10, fontStyle:"italic", color:"var(--text3)", lineHeight:1.55, display:"block" }}>
+                    {reasoning}
+                  </span>
+                </div>
+              )}
 
               {/* Tool rows */}
               {tools.map((entry, i) => {
@@ -484,6 +500,7 @@ export default function TriageView({ incidentId, onBack }) {
   const [incidentData,  setIncidentData]  = useState(null);
   const [loading,       setLoading]       = useState(true);
   const [toolLog,       setToolLog]       = useState([]);
+  const [reasoningLog,  setReasoningLog]  = useState([]);
   const [agentState,    setAgentState]    = useState({});
   const [pipelineDone,  setPipelineDone]  = useState(false);
   const [summary,       setSummary]       = useState(null);
@@ -546,6 +563,13 @@ export default function TriageView({ incidentId, onBack }) {
       ));
       setAgentState(p => ({ ...p, [agent]:{ status:"done", result:data } }));
     }
+    else if (phase === "agent_reasoning") {
+      setReasoningLog(prev => {
+        const exists = prev.find(r => r.turn === data.turn);
+        if (exists) return prev;
+        return [...prev, { turn: data.turn, text: data.text, tools_called: data.tools_called || [] }];
+      });
+    }
     else if (phase === "pipeline_completed") {
       setPipelineDone(true);
       setSummary(data);
@@ -587,6 +611,7 @@ export default function TriageView({ incidentId, onBack }) {
         />
         <ReactLog
           toolLog={toolLog}
+          reasoningLog={reasoningLog}
           pipelineDone={pipelineDone}
           totalIterations={totalIters}
         />

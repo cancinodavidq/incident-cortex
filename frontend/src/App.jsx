@@ -4,6 +4,25 @@ import TriageView from "./components/TriageView";
 import IncidentList from "./components/IncidentList";
 import MetricsDashboard from "./components/MetricsDashboard";
 
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding:32, color:"#fca5a5", background:"rgba(239,68,68,.08)", border:"1px solid rgba(239,68,68,.25)", borderRadius:10, margin:32 }}>
+          <div style={{ fontWeight:700, marginBottom:8 }}>Render error</div>
+          <pre style={{ fontSize:12, whiteSpace:"pre-wrap", fontFamily:"monospace", color:"#fca5a5" }}>{this.state.error.message}</pre>
+          <button onClick={() => this.setState({ error: null })} style={{ marginTop:16, padding:"6px 16px", background:"rgba(239,68,68,.15)", border:"1px solid rgba(239,68,68,.3)", borderRadius:6, color:"#fca5a5", cursor:"pointer" }}>
+            Dismiss
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 const s = {
   shell: { display:"flex", flexDirection:"column", minHeight:"100vh" },
   header: { borderBottom:"1px solid var(--border)", background:"var(--surface)", padding:"0 32px", display:"flex", alignItems:"center", justifyContent:"space-between", height:56, flexShrink:0 },
@@ -44,10 +63,12 @@ export default function App() {
       </header>
 
       <main style={s.main}>
-        {tab === "submit"  && !incidentId && <IncidentForm onSubmitted={handleSubmitted} />}
-        {tab === "triage"  && incidentId  && <TriageView incidentId={incidentId} onBack={() => go("recent")} />}
-        {tab === "recent"  && !incidentId && <IncidentList onSelect={handleSelect} />}
-        {tab === "metrics" && <MetricsDashboard />}
+        <ErrorBoundary>
+          {tab === "submit"  && !incidentId && <IncidentForm onSubmitted={handleSubmitted} />}
+          {tab === "triage"  && incidentId  && <TriageView incidentId={incidentId} onBack={() => go("recent")} />}
+          {tab === "recent"  && !incidentId && <IncidentList onSelect={handleSelect} onNew={() => go("submit")} />}
+          {tab === "metrics" && <MetricsDashboard />}
+        </ErrorBoundary>
       </main>
     </div>
   );

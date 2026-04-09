@@ -9,7 +9,7 @@ const s = {
   input:  { width:"100%", background:"var(--surface2)", border:"1px solid var(--border2)", borderRadius:8, padding:"10px 14px", color:"var(--text)", fontSize:14, outline:"none", transition:"border-color .15s", display:"block" },
   textarea: { width:"100%", background:"var(--surface2)", border:"1px solid var(--border2)", borderRadius:8, padding:"10px 14px", color:"var(--text)", fontSize:14, outline:"none", resize:"vertical", minHeight:120, fontFamily:"inherit", transition:"border-color .15s", display:"block" },
   err:    { fontSize:12, color:"var(--red)", marginTop:5 },
-  btn:    { width:"100%", padding:"12px", background:"var(--accent)", border:"none", borderRadius:8, color:"#fff", fontSize:14, fontWeight:600, letterSpacing:"-0.01em", transition:"opacity .15s", marginTop:8 },
+  btn:    { width:"100%", padding:"12px", background:"var(--accent)", border:"none", borderRadius:8, color:"#fff", fontSize:14, fontWeight:600, letterSpacing:"-0.01em", transition:"opacity .15s", marginTop:8, cursor:"pointer" },
   errBox: { background:"rgba(239,68,68,0.08)", border:"1px solid rgba(239,68,68,0.3)", borderRadius:8, padding:"10px 14px", fontSize:13, color:"#fca5a5", marginBottom:16 },
   spinner: { width:16, height:16, border:"2px solid rgba(255,255,255,.3)", borderTopColor:"#fff", borderRadius:"50%", display:"inline-block", animation:"spin .6s linear infinite", marginRight:8, verticalAlign:"middle" },
 };
@@ -88,7 +88,9 @@ export default function IncidentForm({ onSubmitted }) {
         <div style={s.field}>
           <label style={s.label}>Reporter Email</label>
           <input
-            type="email"
+            type="text"
+            inputMode="email"
+            autoComplete="email"
             style={{...s.input, ...(errors.reporter_email ? {borderColor:"var(--red)"} : {})}}
             placeholder="you@company.com"
             value={form.reporter_email}
@@ -99,7 +101,7 @@ export default function IncidentForm({ onSubmitted }) {
           {errors.reporter_email && <div style={s.err}>{errors.reporter_email}</div>}
         </div>
 
-        <button style={{...s.btn, opacity: loading ? 0.7 : 1}} disabled={loading}>
+        <button type="submit" style={{...s.btn, opacity: loading ? 0.7 : 1}} disabled={loading}>
           {loading && <span style={s.spinner} />}
           {loading ? "Submitting…" : "Submit Incident"}
         </button>

@@ -437,6 +437,18 @@ async def run_incident_pipeline(
             # ── collect tool_use blocks ───────────────────────────────────────
             tool_uses = [b for b in response.content if b.type == "tool_use"]
 
+            # ── emit Claude's reasoning text for this turn ────────────────────
+            text_blocks = [b.text.strip() for b in response.content if b.type == "text" and b.text.strip()]
+            if text_blocks:
+                reasoning = " ".join(text_blocks)
+                tool_names = [tu.name for tu in tool_uses]
+                await emit("agent_reasoning", "orchestrator", {
+                    "turn": iteration + 1,
+                    "text": reasoning,
+                    "tools_called": tool_names,
+                })
+                logger.info(f"Turn {iteration+1} reasoning: {reasoning[:120]}…")
+
             if response.stop_reason == "end_turn" or not tool_uses:
                 logger.info(f"ReAct loop complete after {iteration + 1} iterations")
                 break

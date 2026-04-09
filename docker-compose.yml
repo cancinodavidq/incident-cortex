@@ -61,6 +61,7 @@ services:
       REACT_APP_API_URL: http://localhost:8000
     volumes:
       - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
     networks:
       - cortex_net
 

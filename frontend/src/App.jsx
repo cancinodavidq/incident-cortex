@@ -3,6 +3,7 @@ import IncidentForm from "./components/IncidentForm";
 import TriageView from "./components/TriageView";
 import IncidentList from "./components/IncidentList";
 import MetricsDashboard from "./components/MetricsDashboard";
+import SystemDocs from "./components/SystemDocs";
 
 class ErrorBoundary extends React.Component {
   constructor(props) { super(props); this.state = { error: null }; }
@@ -56,7 +57,7 @@ export default function App() {
           </div>
         </div>
         <nav style={s.nav}>
-          {[["submit","Submit"],["recent","Recent"],["metrics","Metrics"]].map(([id,label]) => (
+          {[["submit","Submit"],["recent","Recent"],["metrics","Metrics"],["system","System"]].map(([id,label]) => (
             <button key={id} style={tab===id ? {...s.tab,...s.tabActive} : s.tab} onClick={() => go(id)}>{label}</button>
           ))}
         </nav>
@@ -68,6 +69,7 @@ export default function App() {
           {tab === "triage"  && incidentId  && <TriageView incidentId={incidentId} onBack={() => go("recent")} />}
           {tab === "recent"  && !incidentId && <IncidentList onSelect={handleSelect} onNew={() => go("submit")} />}
           {tab === "metrics" && <MetricsDashboard />}
+          {tab === "system"  && <SystemDocs />}
         </ErrorBoundary>
       </main>
     </div>

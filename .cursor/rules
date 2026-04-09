@@ -7,8 +7,10 @@ All services run in Docker. Backend hot-reloads on file save. Frontend hot-reloa
 ## Architecture Quick Reference
 
 - **Entry point**: `backend/app/main.py`
-- **Agent pipeline**: `backend/app/agents/orchestrator.py` — StateGraph definition
-- **Agent state**: `backend/app/models/incident.py` — IncidentState TypedDict
+- **Agent pipeline**: `backend/app/agents/orchestrator.py` — ReAct tool-calling loop (NOT LangGraph)
+- **Tool schemas**: `TOOLS` list in `orchestrator.py` — Anthropic tool use format
+- **Tool handlers**: `TOOL_HANDLERS` dict in `orchestrator.py` — async functions per tool
+- **Agent state**: mutable `dict` passed through tool handlers (IncidentState TypedDict kept for type hints)
 - **Agent files**: `backend/app/agents/{intake,code_analysis,deduplication,triage_synth,ticket_agent,notification}.py`
 - **Services**: `backend/app/services/{event_store,vector_store,llm_client}.py`
 - **API routes**: `backend/app/api/routes.py` (REST) + `websocket.py` (WS)
@@ -39,18 +41,22 @@ All services run in Docker. Backend hot-reloads on file save. Frontend hot-reloa
 
 ## Agent Development Rules
 
-### Adding a new agent
-1. Create `backend/app/agents/my_agent.py` with `async def my_agent(state: IncidentState) -> dict`
-2. Add it to `orchestrator.py`: `graph.add_node("my_agent", my_agent_node)`
-3. Wire edges and conditional routing in `build_graph()`
-4. Add the new state fields to `IncidentState` in `models/incident.py`
-5. Include output in `pipeline_summary` in `run_incident_pipeline()`
-6. Add an entry to `AGENTS.md`
+### Adding a new tool/agent
+1. Create `backend/app/agents/my_agent.py` with `async def my_agent(state: dict) -> dict`
+2. Add a tool schema to `TOOLS` list in `orchestrator.py` with `name`, `description`, `input_schema`
+3. Add a handler `async def _handle_my_agent(inputs: dict, state: dict) -> dict` in `orchestrator.py`
+4. Register in `TOOL_HANDLERS` dict
+5. Add WS mapping in `TOOL_TO_AGENT_ID` and start message in `TOOL_START_MSG`
+6. Update `SYSTEM_PROMPT` to describe when Claude should call this tool
+7. Add entry to `AGENTS.md`
 
-### Modifying routing logic
-- Routing functions (`_route_after_triage`, `_route_intake`) must return string keys
-  matching the second argument of `add_conditional_edges()`
-- LangGraph `Send()` for parallel dispatch: `return [Send("node_a", state), Send("node_b", state)]`
+### How the ReAct loop works
+- Claude receives the incident + tool schemas
+- Claude responds with `tool_use` blocks (can include multiple tools per turn)
+- All tools in a single turn run in parallel via `asyncio.gather`
+- Results return as `tool_result` content blocks
+- Loop continues until `stop_reason == "end_turn"` or max 15 iterations
+- NEVER hardcode routing — Claude decides based on system prompt guidance
 
 ### LLM prompts
 - Always ask for JSON output and use `LLMClient.extract_json()` to strip markdown fences

@@ -3,14 +3,37 @@
 This file is the machine-readable manifest for the Incident Cortex 6-agent LangGraph pipeline.
 It defines each agent's capabilities, inputs, outputs, routing behavior, and operational constraints.
 
-## Pipeline Overview
+## Architecture Pattern: ReAct Tool-Calling
+
+Incident Cortex uses the **ReAct (Reasoning + Acting)** pattern via Claude's native tool use API.
+Instead of a fixed LangGraph StateGraph, Claude autonomously decides which tools to call and in what order.
 
 ```
-intake → [code_analysis ‖ dedup] → triage_synth → (escalate?) → ticket → notify
-                                                 ↘ (duplicate) → notify
+User incident text
+       │
+       ▼
+Claude (claude-sonnet-4-6) ←──── tool_result blocks
+       │
+       ▼ (tool_use blocks — may call multiple tools per turn)
+   Tool Dispatch
+   ┌──────────────────────────────────────────────────────┐
+   │  parse_incident  │  search_codebase  │ check_duplicates │
+   │  synthesize_triage  │  escalate_p1  │  create_ticket   │
+   │                  send_notifications                  │
+   └──────────────────────────────────────────────────────┘
+       │
+       ▼
+ Loop until stop_reason = "end_turn" (max 15 iterations)
 ```
 
-All agent state flows through `IncidentState` (TypedDict in `backend/app/models/incident.py`).
+**Key properties:**
+- Claude calls multiple tools simultaneously in a single turn (e.g., `search_codebase` + `check_duplicates`)
+- Tool handlers mutate a shared `state` dict (replaces IncidentState TypedDict)
+- No hardcoded routing — Claude reasons about what to do next based on tool results
+- Max 15 iterations prevents infinite loops
+- Each tool call broadcasts WS events for real-time UI updates
+
+All agent state flows through a mutable `dict` passed to each tool handler.
 
 ---
 

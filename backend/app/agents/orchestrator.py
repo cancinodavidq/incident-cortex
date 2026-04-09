@@ -1,234 +1,284 @@
-"""LangGraph orchestrator — defines the complete incident triage workflow."""
+"""
+ReAct Tool-Calling Orchestrator — Incident Cortex
 
+Replaces the fixed LangGraph StateGraph with a dynamic Claude tool-calling loop.
+Claude receives the incident, reasons about what to investigate, and autonomously
+decides which tools to call (and in what order) until it reaches a final verdict.
+
+Pattern:
+  1. Claude receives incident + available tools
+  2. Claude emits tool_use blocks (can call multiple tools in one turn)
+  3. Tools execute (in parallel when multiple called simultaneously)
+  4. Results fed back as tool_result content blocks
+  5. Repeat until Claude emits stop_reason = "end_turn"
+"""
+
+import asyncio
+import json
 import logging
 import uuid
 from datetime import datetime
-from typing import Optional, Callable
-
-from langgraph.graph import StateGraph, END
-from langgraph.constants import Send
+from typing import Optional, Callable, Any
 
 from app.config import get_settings
 from app.models.incident import IncidentState
 from app.services.event_store import EventStore
-from app.agents.intake import intake_agent
-from app.agents.code_analysis import code_analysis_agent
-from app.agents.deduplication import dedup_agent
-from app.agents.triage_synth import triage_synthesizer
-from app.agents.ticket_agent import ticket_agent
-from app.agents.notification import notification_agent
 
 logger = logging.getLogger(__name__)
 
+# ── Tool schemas (Anthropic tool use format) ─────────────────────────────────
 
-async def clarity_agent(state: IncidentState) -> dict:
-    """Send clarification request and return."""
-    logger.info(f"Clarification requested for {state.get('incident_id')}")
+TOOLS = [
+    {
+        "name": "parse_incident",
+        "description": (
+            "Parse the raw incident report into structured data: title, affected service, "
+            "error type, symptoms. ALWAYS call this first before any other tool."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "raw_text": {"type": "string", "description": "The raw incident report text"},
+                "reporter_email": {"type": "string", "description": "Reporter email address"}
+            },
+            "required": ["raw_text"]
+        }
+    },
+    {
+        "name": "search_codebase",
+        "description": (
+            "Search the indexed e-commerce codebase for code relevant to this incident "
+            "using semantic RAG. Returns file paths and code snippets. "
+            "Call after parse_incident, in parallel with check_duplicates."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query combining service name, error type, and symptoms"
+                }
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "check_duplicates",
+        "description": (
+            "Check if this incident is semantically similar to an existing open incident. "
+            "Returns similarity score and linked incident ID if duplicate found. "
+            "Call after parse_incident, in parallel with search_codebase."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "incident_text": {
+                    "type": "string",
+                    "description": "Combined title + description to search against past incidents"
+                }
+            },
+            "required": ["incident_text"]
+        }
+    },
+    {
+        "name": "synthesize_triage",
+        "description": (
+            "Produce the final triage verdict: severity (P1-P4), confidence score, "
+            "root cause hypothesis, investigation steps, remediation runbook with commands, "
+            "and suggested assignee team. Call after search_codebase and check_duplicates."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "name": "escalate_p1",
+        "description": (
+            "Trigger P1 escalation: page oncall, mark incident as critical, "
+            "emit urgent alert. ONLY call this when severity is P1. "
+            "Call before create_ticket for P1 incidents."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Incident title"},
+                "assignee_team": {
+                    "type": "string",
+                    "description": "Team to page: sre-team, backend, data, platform"
+                }
+            },
+            "required": ["title"]
+        }
+    },
+    {
+        "name": "create_ticket",
+        "description": (
+            "Create a Jira ticket for this incident with severity-based priority. "
+            "Skip this if the incident is a confirmed duplicate (check_duplicates returned is_duplicate=true)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "name": "send_notifications",
+        "description": (
+            "Send email notifications to the team and reporter, and post to Slack. "
+            "ALWAYS call this as the final step."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    }
+]
+
+SYSTEM_PROMPT = """You are an expert SRE triage orchestrator. You will receive an incident report
+and must investigate it thoroughly using the available tools.
+
+REQUIRED workflow:
+1. parse_incident — always first
+2. search_codebase AND check_duplicates — call both simultaneously in a single turn
+3. synthesize_triage — produce severity, root cause, runbook
+4. If severity is P1: call escalate_p1 before create_ticket
+5. If NOT a duplicate: call create_ticket
+6. send_notifications — always last
+
+Be decisive. Do not ask clarifying questions. Use all tools in sequence.
+When you can call multiple tools simultaneously (step 2), do so in a single response."""
+
+
+# ── Tool handlers ─────────────────────────────────────────────────────────────
+
+async def _handle_parse_incident(inputs: dict, state: dict) -> dict:
+    from app.agents.intake import intake_agent
+    state.update({"raw_text": inputs.get("raw_text", state.get("raw_text", ""))})
+    result = await intake_agent(state)
+    state.update(result)
+    return result.get("parsed_incident", {})
+
+
+async def _handle_search_codebase(inputs: dict, state: dict) -> dict:
+    from app.agents.code_analysis import code_analysis_agent
+    result = await code_analysis_agent(state)
+    state.update(result)
+    ca = result.get("code_analysis", {})
     return {
-        "current_phase": "request_clarity"
+        "relevant_files": ca.get("relevant_files", []),
+        "analysis_summary": ca.get("analysis_summary", ""),
+        "functions_involved": ca.get("functions_involved", []),
+        "degraded": ca.get("degraded", False),
     }
 
 
-def _route_after_triage(state: IncidentState) -> str:
-    """Route after triage: escalate (P1), ticket (P2-P4), or link_existing (duplicate)."""
-    dedup = state.get("dedup_result", {})
-
-    # Confirmed duplicate → skip ticket, just notify
-    if dedup.get("is_duplicate") and dedup.get("highest_similarity", 0) >= 0.85:
-        return "link_existing"
-
-    # P1 critical incidents → escalation fast path
-    verdict = state.get("triage_verdict") or {}
-    if verdict.get("severity") == "P1":
-        return "escalate"
-
-    return "ticket"
+async def _handle_check_duplicates(inputs: dict, state: dict) -> dict:
+    from app.agents.deduplication import dedup_agent
+    result = await dedup_agent(state)
+    state.update(result)
+    return result.get("dedup_result", {})
 
 
-def _join_node(state: IncidentState) -> dict:
-    """Reduction node — waits for parallel branches."""
-    return state
+async def _handle_synthesize_triage(inputs: dict, state: dict) -> dict:
+    from app.agents.triage_synth import triage_synthesizer
+    result = await triage_synthesizer(state)
+    state.update(result)
+    verdict = result.get("triage_verdict") or {}
+    return {
+        "severity": verdict.get("severity"),
+        "confidence": verdict.get("confidence"),
+        "root_cause_hypothesis": verdict.get("root_cause_hypothesis"),
+        "runbook_steps": len(verdict.get("runbook", [])),
+        "suggested_assignee_team": verdict.get("suggested_assignee_team"),
+        "needs_human_review": verdict.get("needs_human_review"),
+    }
 
 
-def build_graph(incident_id: str = "", emit=None):
-    """
-    Build and compile the LangGraph workflow.
+async def _handle_escalate_p1(inputs: dict, state: dict) -> dict:
+    state["escalation_triggered"] = True
+    logger.info(f"P1 escalation triggered for: {inputs.get('title')}")
+    return {
+        "escalated": True,
+        "team_paged": inputs.get("assignee_team", "sre-team"),
+        "message": "Oncall paged. Incident marked critical.",
+    }
 
-    Args:
-        incident_id: Used for live broadcasting
-        emit: async callable(phase, agent, data) for WebSocket broadcasting
-    """
 
-    async def _emit(phase: str, agent: str, data: dict):
-        if emit:
-            try:
-                await emit(phase, agent, data)
-            except Exception as e:
-                logger.warning(f"WS emit failed: {e}")
+async def _handle_create_ticket(inputs: dict, state: dict) -> dict:
+    from app.agents.ticket_agent import ticket_agent
+    result = await ticket_agent(state)
+    state.update(result)
+    return {
+        "ticket_id": result.get("ticket_id"),
+        "ticket_url": result.get("ticket_url"),
+    }
 
-    # --- Agent wrappers with broadcast ---
 
-    async def intake_node(state: IncidentState) -> dict:
-        await _emit("agent_started", "intake", {"message": "Parsing incident report..."})
-        result = await intake_agent(state)
-        parsed = result.get("parsed_incident") or {}
-        await _emit("agent_completed", "intake", {
-            "title": parsed.get("title", ""),
-            "affected_service": parsed.get("affected_service", ""),
-            "error_type": parsed.get("error_type", ""),
-            "information_sufficient": parsed.get("information_sufficient", True),
-        })
-        return result
+async def _handle_send_notifications(inputs: dict, state: dict) -> dict:
+    from app.agents.notification import notification_agent
+    result = await notification_agent(state)
+    state.update(result)
+    return {"notifications_sent": result.get("notifications_sent", [])}
 
-    async def code_analysis_node(state: IncidentState) -> dict:
-        await _emit("agent_started", "code_analysis", {"message": "Searching codebase for relevant files..."})
-        result = await code_analysis_agent(state)
-        analysis = result.get("code_analysis") or {}
-        await _emit("agent_completed", "code_analysis", {
-            "relevant_files": analysis.get("relevant_files", []),
-            "summary": analysis.get("analysis_summary", ""),
-            "degraded": analysis.get("degraded", False),
-        })
-        return result
 
-    async def dedup_node(state: IncidentState) -> dict:
-        await _emit("agent_started", "dedup", {"message": "Checking for duplicate incidents..."})
-        result = await dedup_agent(state)
-        dedup = result.get("dedup_result") or {}
-        await _emit("agent_completed", "dedup", {
-            "is_duplicate": dedup.get("is_duplicate", False),
-            "highest_similarity": dedup.get("highest_similarity", 0.0),
-            "recommendation": dedup.get("recommendation", "create_new"),
-            "linked_incident_id": dedup.get("linked_incident_id", ""),
-        })
-        return result
+TOOL_HANDLERS: dict[str, Any] = {
+    "parse_incident":     _handle_parse_incident,
+    "search_codebase":    _handle_search_codebase,
+    "check_duplicates":   _handle_check_duplicates,
+    "synthesize_triage":  _handle_synthesize_triage,
+    "escalate_p1":        _handle_escalate_p1,
+    "create_ticket":      _handle_create_ticket,
+    "send_notifications": _handle_send_notifications,
+}
 
-    async def triage_node(state: IncidentState) -> dict:
-        await _emit("agent_started", "triage_synth", {"message": "Synthesizing severity and root cause..."})
-        result = await triage_synthesizer(state)
-        verdict = result.get("triage_verdict") or {}
-        await _emit("agent_completed", "triage_synth", {
-            "severity": verdict.get("severity", ""),
-            "confidence": verdict.get("confidence", 0),
-            "root_cause_hypothesis": verdict.get("root_cause_hypothesis", ""),
-            "investigation_steps": verdict.get("investigation_steps", []),
-            "runbook": verdict.get("runbook", []),
-            "suggested_assignee_team": verdict.get("suggested_assignee_team", "sre-team"),
-            "needs_human_review": verdict.get("needs_human_review", False),
-        })
-        return result
+# Map tool name → WS agent id (for UI pipeline panel)
+TOOL_TO_AGENT_ID = {
+    "parse_incident":     "intake",
+    "search_codebase":    "code_analysis",
+    "check_duplicates":   "dedup",
+    "synthesize_triage":  "triage_synth",
+    "escalate_p1":        "escalate",
+    "create_ticket":      "ticket",
+    "send_notifications": "notify",
+}
 
-    async def escalate_node(state: IncidentState) -> dict:
-        """P1 fast path: emit urgent alert before creating ticket."""
-        verdict = state.get("triage_verdict") or {}
-        parsed = state.get("parsed_incident") or {}
-        await _emit("agent_started", "escalate", {"message": "P1 detected — triggering escalation..."})
-        await _emit("agent_completed", "escalate", {
-            "severity": "P1",
-            "title": parsed.get("title", ""),
-            "assignee_team": verdict.get("suggested_assignee_team", "sre-team"),
-            "message": "Oncall paged. Escalation path activated."
-        })
-        return {"escalation_triggered": True, "current_phase": "escalating"}
+TOOL_START_MSG = {
+    "parse_incident":     "Parsing incident report...",
+    "search_codebase":    "Searching codebase for relevant files...",
+    "check_duplicates":   "Checking for duplicate incidents...",
+    "synthesize_triage":  "Synthesizing triage verdict and runbook...",
+    "escalate_p1":        "P1 detected — triggering escalation...",
+    "create_ticket":      "Creating Jira ticket...",
+    "send_notifications": "Sending email and Slack notifications...",
+}
 
-    async def ticket_node(state: IncidentState) -> dict:
-        await _emit("agent_started", "ticket", {"message": "Creating Jira ticket..."})
-        result = await ticket_agent(state)
-        await _emit("agent_completed", "ticket", {
-            "ticket_id": result.get("ticket_id", ""),
-            "ticket_url": result.get("ticket_url", ""),
-        })
-        return result
 
-    async def notify_node(state: IncidentState) -> dict:
-        await _emit("agent_started", "notify", {"message": "Sending notifications..."})
-        result = await notification_agent(state)
-        await _emit("agent_completed", "notify", {
-            "notifications_sent": result.get("notifications_sent", []),
-        })
-        return result
-
-    async def clarity_node(state: IncidentState) -> dict:
-        await _emit("agent_completed", "intake", {"information_sufficient": False,
-                                                   "message": "Insufficient information — clarification requested."})
-        return await clarity_agent(state)
-
-    # --- Build graph ---
-    graph = StateGraph(IncidentState)
-
-    graph.add_node("intake", intake_node)
-    graph.add_node("run_code_analysis", code_analysis_node)
-    graph.add_node("dedup", dedup_node)
-    graph.add_node("join_analysis", _join_node)
-    graph.add_node("triage_synth", triage_node)
-    graph.add_node("escalate", escalate_node)
-    graph.add_node("ticket", ticket_node)
-    graph.add_node("notify", notify_node)
-    graph.add_node("request_clarity", clarity_node)
-
-    graph.set_entry_point("intake")
-
-    def _route_intake(state: IncidentState):
-        parsed = state.get("parsed_incident", {})
-        if parsed.get("information_sufficient", True):
-            return [Send("run_code_analysis", state), Send("dedup", state)]
-        return "request_clarity"
-
-    graph.add_conditional_edges(
-        "intake",
-        _route_intake,
-        {
-            "run_code_analysis": "run_code_analysis",
-            "dedup": "dedup",
-            "request_clarity": "request_clarity"
-        }
-    )
-
-    graph.add_edge("run_code_analysis", "join_analysis")
-    graph.add_edge("dedup", "join_analysis")
-    graph.add_edge("join_analysis", "triage_synth")
-
-    graph.add_conditional_edges(
-        "triage_synth",
-        _route_after_triage,
-        {
-            "ticket": "ticket",
-            "escalate": "escalate",
-            "link_existing": "notify"
-        }
-    )
-
-    graph.add_edge("escalate", "ticket")
-    graph.add_edge("ticket", "notify")
-    graph.add_edge("notify", END)
-    graph.add_edge("request_clarity", END)
-
-    compiled_graph = graph.compile()
-    logger.info("LangGraph compiled successfully")
-    return compiled_graph
-
+# ── ReAct loop ────────────────────────────────────────────────────────────────
 
 async def run_incident_pipeline(
     incident_data: dict,
-    ws_callback: Optional[Callable] = None
+    ws_callback: Optional[Callable] = None,
 ) -> dict:
     """
-    Run the incident triage pipeline.
+    Run the incident triage pipeline using ReAct tool-calling.
 
-    Args:
-        incident_data: Dict with raw_text, attachments, reporter_email
-        ws_callback: Optional sync/async callback(phase, agent, data) for WebSocket streaming
-
-    Returns:
-        Final state dict
+    Claude drives the workflow by calling tools in the right order.
+    Multiple tools can be called simultaneously in a single turn.
     """
-    from app.services.event_store import get_event_store
+    import anthropic as anthropic_sdk
+
     settings = get_settings()
-    event_store = await get_event_store()
+    from app.services.event_store import get_event_store as _get_event_store
+    event_store = await _get_event_store()
 
     incident_id = incident_data.get("incident_id", str(uuid.uuid4()))
     submitted_at = datetime.utcnow().isoformat()
 
+    # ── emit helper ──────────────────────────────────────────────────────────
     async def emit(phase: str, agent: str, data: dict):
         if ws_callback:
             try:
@@ -236,92 +286,178 @@ async def run_incident_pipeline(
             except Exception as e:
                 logger.warning(f"ws_callback error: {e}")
 
-    initial_state: IncidentState = {
+    # ── initial state ────────────────────────────────────────────────────────
+    state: dict = {
         "incident_id": incident_id,
         "submitted_at": submitted_at,
-        "raw_text": incident_data.get("raw_text", f"{incident_data.get('title', '')}\n\n{incident_data.get('description', '')}"),
+        "raw_text": incident_data.get(
+            "raw_text",
+            f"{incident_data.get('title', '')}\n\n{incident_data.get('description', '')}"
+        ),
         "attachments": incident_data.get("attachments", []),
         "reporter_email": incident_data.get("reporter_email", ""),
         "parsed_incident": None,
-        "extracted_from_image": None,
         "code_analysis": None,
         "dedup_result": None,
         "triage_verdict": None,
         "ticket_id": None,
         "ticket_url": None,
         "notifications_sent": [],
-        "current_phase": "initialized"
+        "escalation_triggered": False,
+        "current_phase": "initialized",
     }
 
     await event_store.log_event(
         incident_id=uuid.UUID(incident_id),
         phase="pipeline_started",
         agent="orchestrator",
-        payload={"submitted_at": submitted_at}
+        payload={"submitted_at": submitted_at, "pattern": "react_tool_calling"}
     )
 
-    # Emit pipeline start
     await emit("pipeline_started", "orchestrator", {
         "incident_id": incident_id,
-        "agents": ["intake", "code_analysis", "dedup", "triage_synth", "ticket", "notify"]
+        "pattern": "react_tool_calling",
+        "agents": list(TOOL_TO_AGENT_ID.values()),
     })
 
-    logger.info(f"Starting incident pipeline for {incident_id}")
+    # ── build Anthropic client ────────────────────────────────────────────────
+    if not settings.anthropic_api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY required for ReAct tool-calling")
 
-    compiled = build_graph(incident_id=incident_id, emit=emit)
+    client = anthropic_sdk.Anthropic(api_key=settings.anthropic_api_key)
+
+    # ── initial message ───────────────────────────────────────────────────────
+    messages = [
+        {
+            "role": "user",
+            "content": (
+                f"Triage this incident:\n\n"
+                f"Title: {incident_data.get('title', '')}\n"
+                f"Description: {incident_data.get('description', '') or incident_data.get('raw_text', '')}\n"
+                f"Reporter: {incident_data.get('reporter_email', '')}\n"
+                f"Incident ID: {incident_id}"
+            )
+        }
+    ]
+
+    MAX_ITERATIONS = 15
+    loop = asyncio.get_event_loop()
 
     try:
-        final_state = await compiled.ainvoke(initial_state)
+        for iteration in range(MAX_ITERATIONS):
+            # ── call Claude with tools ────────────────────────────────────────
+            logger.info(f"ReAct iteration {iteration + 1}")
+            response = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: client.messages.create(
+                        model="claude-sonnet-4-6",
+                        max_tokens=4096,
+                        system=SYSTEM_PROMPT,
+                        tools=TOOLS,
+                        messages=messages,
+                    )
+                ),
+                timeout=90.0
+            )
 
-        verdict = final_state.get("triage_verdict") or {}
-        dedup = final_state.get("dedup_result") or {}
-        code_analysis = final_state.get("code_analysis") or {}
+            # ── collect tool_use blocks ───────────────────────────────────────
+            tool_uses = [b for b in response.content if b.type == "tool_use"]
+
+            if response.stop_reason == "end_turn" or not tool_uses:
+                logger.info(f"ReAct loop complete after {iteration + 1} iterations")
+                break
+
+            # ── emit started for all tools in this turn ───────────────────────
+            for tu in tool_uses:
+                agent_id = TOOL_TO_AGENT_ID.get(tu.name, tu.name)
+                await emit("agent_started", agent_id, {
+                    "message": TOOL_START_MSG.get(tu.name, f"Running {tu.name}..."),
+                    "inputs": tu.input,
+                })
+
+            # ── execute all tools in this turn (parallel if multiple) ─────────
+            async def run_tool(tu) -> tuple[str, str, dict, Exception | None]:
+                """Execute one tool call, return (tool_use_id, name, result, error)."""
+                handler = TOOL_HANDLERS.get(tu.name)
+                if not handler:
+                    return tu.id, tu.name, {"error": f"Unknown tool: {tu.name}"}, None
+                try:
+                    result = await handler(tu.input, state)
+                    return tu.id, tu.name, result, None
+                except Exception as e:
+                    logger.exception(f"Tool {tu.name} failed: {e}")
+                    return tu.id, tu.name, {"error": str(e)}, e
+
+            tool_results_raw = await asyncio.gather(*[run_tool(tu) for tu in tool_uses])
+
+            # ── emit completed + build tool_result content blocks ────────────
+            tool_result_blocks = []
+            for (tu_id, name, result, err) in tool_results_raw:
+                agent_id = TOOL_TO_AGENT_ID.get(name, name)
+                await emit("agent_completed", agent_id, result)
+
+                tool_result_blocks.append({
+                    "type": "tool_result",
+                    "tool_use_id": tu_id,
+                    "content": json.dumps(result),
+                })
+
+            # ── update message history ────────────────────────────────────────
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "user", "content": tool_result_blocks})
+
+        # ── build pipeline summary ────────────────────────────────────────────
+        verdict = state.get("triage_verdict") or {}
+        dedup   = state.get("dedup_result") or {}
+        code_a  = state.get("code_analysis") or {}
 
         pipeline_summary = {
-            "incident_id": incident_id,
-            "severity": verdict.get("severity"),
-            "confidence": verdict.get("confidence"),
-            "root_cause_hypothesis": verdict.get("root_cause_hypothesis"),
-            "investigation_steps": verdict.get("investigation_steps", []),
-            "runbook": verdict.get("runbook", []),
+            "incident_id":          incident_id,
+            "pattern":              "react_tool_calling",
+            "severity":             verdict.get("severity"),
+            "confidence":           verdict.get("confidence"),
+            "root_cause_hypothesis":verdict.get("root_cause_hypothesis"),
+            "investigation_steps":  verdict.get("investigation_steps", []),
+            "runbook":              verdict.get("runbook", []),
             "suggested_assignee_team": verdict.get("suggested_assignee_team", "sre-team"),
-            "needs_human_review": verdict.get("needs_human_review", False),
-            "escalation_triggered": final_state.get("escalation_triggered", False),
-            "ticket_id": final_state.get("ticket_id"),
-            "ticket_url": final_state.get("ticket_url"),
-            "is_duplicate": dedup.get("is_duplicate", False),
-            "highest_similarity": dedup.get("highest_similarity", 0),
-            "linked_incident_id": dedup.get("linked_incident_id", ""),
-            "notifications_sent": final_state.get("notifications_sent", []),
-            "relevant_files": code_analysis.get("relevant_files", []),
+            "needs_human_review":   verdict.get("needs_human_review", False),
+            "escalation_triggered": state.get("escalation_triggered", False),
+            "ticket_id":            state.get("ticket_id"),
+            "ticket_url":           state.get("ticket_url"),
+            "is_duplicate":         dedup.get("is_duplicate", False),
+            "highest_similarity":   dedup.get("highest_similarity", 0),
+            "linked_incident_id":   dedup.get("linked_incident_id", ""),
+            "notifications_sent":   state.get("notifications_sent", []),
+            "relevant_files":       code_a.get("relevant_files", []),
+            "iterations":           iteration + 1,
             # Full agent outputs for UI reconstruction
-            "intake": final_state.get("parsed_incident") or {},
-            "code_analysis": code_analysis,
-            "dedup_result": dedup,
+            "intake":        state.get("parsed_incident") or {},
+            "code_analysis": code_a,
+            "dedup_result":  dedup,
             "triage_verdict": verdict,
         }
 
-        # Persist so UI can load it even after WS disconnects
         await event_store.save_pipeline_result(incident_id, pipeline_summary)
-
         await emit("pipeline_completed", "orchestrator", pipeline_summary)
-
         await event_store.log_event(
             incident_id=uuid.UUID(incident_id),
             phase="pipeline_completed",
             agent="orchestrator",
             payload={
-                "final_phase": final_state.get("current_phase"),
-                "ticket_id": final_state.get("ticket_id"),
-                "severity": verdict.get("severity") if verdict else None
+                "ticket_id": state.get("ticket_id"),
+                "severity": verdict.get("severity"),
+                "iterations": iteration + 1,
             }
         )
 
-        logger.info(f"Pipeline completed for {incident_id}: {final_state.get('current_phase')}")
-        return final_state
+        logger.info(
+            f"Pipeline completed for {incident_id} in {iteration + 1} ReAct iterations"
+        )
+        return state
 
     except Exception as e:
-        logger.exception(f"Pipeline execution failed for {incident_id}: {e}")
+        logger.exception(f"ReAct pipeline failed for {incident_id}: {e}")
         await emit("pipeline_failed", "orchestrator", {"error": str(e)})
         await event_store.log_event(
             incident_id=uuid.UUID(incident_id),
@@ -332,6 +468,10 @@ async def run_incident_pipeline(
         raise
 
 
+# ── Compat shim (API routes call get_orchestrator) ────────────────────────────
+
 def get_orchestrator():
-    """Get the compiled graph (singleton-like pattern)."""
-    return build_graph()
+    """Backward-compat shim — returns the run function directly."""
+    return run_incident_pipeline
+
+

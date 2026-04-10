@@ -112,7 +112,7 @@ class TriageVerdict(BaseModel):
             self.needs_human_review = True
 
 
-# --- LangGraph State ---
+# --- Pipeline State ---
 
 class IncidentState(TypedDict, total=False):
     # Identity

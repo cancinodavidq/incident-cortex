@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-Incident Cortex is a 6-agent LangGraph pipeline that triages SRE incidents end-to-end. It takes raw incident reports (text, Slack messages, or form submissions), runs them through a structured agent workflow, and produces severity assessments, root cause hypotheses, Jira tickets, and notifications — all in ~15 seconds.
+Incident Cortex is a ReAct tool-calling pipeline with 10 tools/agents that triages SRE incidents end-to-end. It takes raw incident reports (text, Slack messages, form submissions, log file attachments, or screenshots), runs them through a Claude-driven tool loop, and produces severity assessments, root cause hypotheses, Jira tickets, and notifications — all in ~15 seconds. The orchestration pattern is ReAct (Reasoning + Acting) via the Anthropic Messages API, replacing the original LangGraph StateGraph.
 
 ## Running the System
 
@@ -41,26 +41,39 @@ docker compose exec backend pytest --cov=agents tests/
 
 ### Agent Pipeline (`backend/app/agents/`)
 
-The pipeline is a LangGraph `StateGraph` defined in `orchestrator.py`. All agent state flows through `IncidentState` (a `TypedDict` in `models/incident.py`).
+The pipeline is a **ReAct tool-calling loop** defined in `orchestrator.py`. Claude (`claude-sonnet-4-6`) receives the incident and autonomously decides which tools to call, in what order, and whether to run them in parallel — up to 15 iterations.
 
-Flow: **intake** → [**code_analysis** ‖ **dedup**] → **join_analysis** → **triage_synth** → (**escalate**?) → **ticket** → **notify**
+**Tool execution flow:**
+1. `parse_incident` — always first (sequential)
+2. Parallel fan-out (single Claude turn, dispatched via `asyncio.gather`):
+   - `search_codebase` — always
+   - `check_duplicates` — always
+   - `query_metrics` — always (if service name known)
+   - `analyze_logs` — only if log/text attachments present
+   - `analyze_images` — only if image attachments present
+3. `synthesize_triage` — after all parallel results are in
+4. `escalate_p1` — only if severity == P1
+5. `create_ticket` — skipped if confirmed duplicate
+6. `send_notifications` — always last
 
-- Code analysis and dedup run **in parallel** via LangGraph `Send()`.
-- After `triage_synth`: P1 severity routes to `escalate` (fast-path, pages oncall), then proceeds to `ticket`.
-- After `triage_synth`: if dedup similarity ≥ 0.85, routes to `notify` (skips ticket creation) to link against existing duplicate.
-- If intake determines the report lacks sufficient info, routes to `request_clarity` and ends.
-- `triage_verdict` now includes `runbook` (list of structured remediation steps with commands) and `suggested_assignee_team`.
+Key behavioral rules:
+- P1 + confidence < 0.5 → auto-degrades to P2, sets `needs_human_review=True`
+- Dedup similarity ≥ 0.85 → skips ticket creation, links to existing incident
+- Insufficient info → clarification email sent, pipeline stops
 - **WebSocket**: browser must connect directly to `ws://localhost:8000/ws/{id}` — CRA dev proxy does NOT forward WS upgrades.
 
-### State Model (`models/incident.py`)
+### State Model
 
-Agents communicate exclusively through `IncidentState`. Each agent reads from state and returns a dict that gets merged back. Key fields:
-- `parsed_incident` — output of intake agent (matches `ParsedIncident`)
-- `code_analysis` — output of code analysis agent (matches `CodeAnalysis`)
-- `dedup_result` — output of dedup agent (matches `DedupResult`)
-- `triage_verdict` — output of synthesizer (matches `TriageVerdict`)
+All agent state flows through a shared mutable `dict` passed by reference to each tool handler. Handlers read from state and write back to disjoint keys, making parallel execution safe without locks. Key state keys:
+- `parsed_incident` — output of `parse_incident` tool
+- `code_analysis` — output of `search_codebase` tool
+- `dedup_result` — output of `check_duplicates` tool
+- `triage_verdict` — output of `synthesize_triage` tool
+- `log_analysis` — output of `analyze_logs` tool (if invoked)
+- `image_analysis` — output of `analyze_images` tool (if invoked)
+- `metrics_result` — output of `query_metrics` tool
 
-`TriageVerdict` has a built-in coherence rule: P1 with confidence < 0.5 auto-degrades to P2 + sets `needs_human_review = True`.
+Pipeline state is also persisted to PostgreSQL via `EventStore` after every tool call for WebSocket replay and audit.
 
 ### Services (`backend/app/services/`)
 

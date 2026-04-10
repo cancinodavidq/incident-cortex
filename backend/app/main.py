@@ -45,7 +45,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Incident Cortex API",
-    description="SRE Incident Triage Agent powered by LangGraph",
+    description="SRE Incident Triage Agent — ReAct tool-calling pipeline (claude-sonnet-4-6)",
     version="1.0.0",
     lifespan=lifespan
 )

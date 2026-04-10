@@ -100,7 +100,8 @@ Jira Mock, Slack Mock, and MailHog are SQLite-backed containers included for dem
 | Single-node Docker Compose | Zero-config demo reproducibility | Kubernetes / ECS task definitions |
 | ChromaDB in-container | No external service required at startup | Pinecone, Weaviate, or distributed ChromaDB |
 | In-process WebSocket registry | Simplicity for single-node | Redis pub/sub |
-| Synchronous LangGraph execution | Predictable latency for demo | Celery or Temporal for async pipeline |
+| Async ReAct loop (asyncio) | Parallel tool dispatch without a task queue | Celery or Temporal for true async pipeline |
 | Static rate limit per process | Sufficient for demo volume | Redis-backed distributed counter |
 | SQLite mock services | Offline demo, no external API keys | Jira API, Slack API, SMTP relay |
 | Langfuse for LLM tracing | Self-hosted, no external dependency | Langfuse Cloud or Datadog LLM observability |
+| Multi-model (Sonnet + Haiku), no OpenRouter | OpenRouter not viable for orchestrator: the ReAct loop depends on Anthropic's native `tool_use`/`tool_result` message format, which other providers implement differently. Haiku already achieves the cost reduction OpenRouter would offer for extraction-only calls (log analysis, image analysis) — ~80% cheaper than Sonnet with no measurable quality loss for those tasks. OpenRouter remains listed in config (`OPENROUTER_MODEL`) as a future path for non-tool-use LLM calls only. | Direct provider integrations (OpenAI, Gemini) behind an abstraction layer that translates tool schemas per provider |

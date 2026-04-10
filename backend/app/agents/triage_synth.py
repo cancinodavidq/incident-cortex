@@ -75,6 +75,7 @@ async def triage_synthesizer(state: IncidentState) -> dict:
         parsed = state.get("parsed_incident", {})
         code_analysis = state.get("code_analysis", {})
         dedup_result = state.get("dedup_result", {})
+        attachments = state.get("attachments", [])
 
         # Early exit for confirmed duplicates
         if dedup_result.get("is_duplicate") and dedup_result.get("highest_similarity", 0) >= 0.85:
@@ -87,6 +88,14 @@ async def triage_synthesizer(state: IncidentState) -> dict:
         # Build comprehensive prompt
         is_code_degraded = code_analysis.get("degraded", False)
 
+        # Build attachment context section
+        attachment_section = ""
+        for att in attachments:
+            if att.get("type") == "text":
+                attachment_section += f"\n\n[Attached file: {att.get('filename')}]\n```\n{att.get('content', '')[:6000]}\n```"
+            elif att.get("type") == "image":
+                attachment_section += f"\n\n[Image attachment: {att.get('filename')} — see extracted text in INCIDENT DETAILS]"
+
         verdict_prompt = f"""You are an expert SRE synthesizer. Given an incident report, code analysis,
 and deduplication results, produce a comprehensive triage verdict WITH a concrete remediation runbook.
 
@@ -97,7 +106,7 @@ CODE ANALYSIS (degraded={is_code_degraded}):
 {json.dumps(code_analysis, indent=2)}
 
 DEDUP RESULT:
-{json.dumps(dedup_result, indent=2)}
+{json.dumps(dedup_result, indent=2)}{attachment_section}
 
 Produce a JSON response matching EXACTLY this schema:
 {{

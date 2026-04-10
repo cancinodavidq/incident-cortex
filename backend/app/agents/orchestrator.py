@@ -159,7 +159,43 @@ TOOLS = [
             },
             "required": ["service"]
         }
-    }
+    },
+    {
+        "name": "analyze_logs",
+        "description": (
+            "Analyze attached log or text files (.log, .txt, .csv, .json, .yaml) for error patterns, "
+            "stack traces, exception frequencies, and anomalies. "
+            "Call this in step 2 IN PARALLEL with other tools ONLY if the incident includes log/text attachments."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "focus": {
+                    "type": "string",
+                    "description": "What to focus on: e.g. 'error patterns', 'latency spikes', 'crash frequency'"
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "analyze_images",
+        "description": (
+            "Perform deep visual analysis on attached screenshots or images (.png, .jpg, .jpeg, .gif): "
+            "dashboards, error dialogs, graphs, flamegraphs, or UI screenshots. "
+            "Call this in step 2 IN PARALLEL with other tools ONLY if the incident includes image attachments."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "focus": {
+                    "type": "string",
+                    "description": "What to look for: e.g. 'error message', 'metric spike', 'CPU graph anomaly'"
+                }
+            },
+            "required": []
+        }
+    },
 ]
 
 SYSTEM_PROMPT = """You are an expert SRE triage orchestrator. You will receive an incident report
@@ -167,14 +203,19 @@ and must investigate it thoroughly using the available tools.
 
 REQUIRED workflow:
 1. parse_incident — always first
-2. search_codebase AND check_duplicates AND query_metrics — call all three simultaneously in a single turn
+2. In a SINGLE turn, call ALL applicable tools in parallel:
+   - search_codebase — always
+   - check_duplicates — always
+   - query_metrics — always (if service name is known)
+   - analyze_logs — ONLY if the incident has log/text file attachments (.log, .txt, .csv, .json, .yaml)
+   - analyze_images — ONLY if the incident has image attachments (.png, .jpg, .jpeg, .gif)
 3. synthesize_triage — produce severity, root cause, runbook
 4. If severity is P1: call escalate_p1 before create_ticket
 5. If NOT a duplicate: call create_ticket
 6. send_notifications — always last
 
-query_metrics is a SKILL that provides live observability data (error rate, latency, anomalies).
-Always call it in step 2 alongside the other parallel tools — it enriches the triage verdict.
+The initial message tells you which attachments are present. Use that to decide whether to call
+analyze_logs and/or analyze_images in step 2.
 
 Be decisive. Do not ask clarifying questions. Use all tools in sequence.
 When you can call multiple tools simultaneously (step 2), do so in a single response."""
@@ -252,6 +293,105 @@ async def _handle_send_notifications(inputs: dict, state: dict) -> dict:
     return {"notifications_sent": result.get("notifications_sent", [])}
 
 
+async def _handle_analyze_logs(inputs: dict, state: dict) -> dict:
+    """Analyze text/log attachments for error patterns, stack traces, and anomalies."""
+    import anthropic as anthropic_sdk
+
+    settings = get_settings()
+    attachments = state.get("attachments", [])
+    text_files = [a for a in attachments if a.get("type") == "text"]
+
+    if not text_files:
+        return {"skipped": True, "reason": "No log/text attachments found"}
+
+    focus = inputs.get("focus", "error patterns, exceptions, and anomalies")
+
+    # Build content with all text attachments
+    files_content = ""
+    for att in text_files:
+        files_content += f"\n\n--- File: {att.get('filename')} ---\n{att.get('content', '')[:10000]}"
+
+    client = anthropic_sdk.Anthropic(api_key=settings.anthropic_api_key)
+    response = await asyncio.get_event_loop().run_in_executor(
+        None,
+        lambda: client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"You are an SRE log analyst. Analyze these log files focusing on: {focus}\n"
+                    f"Extract: top errors/exceptions, frequency, timestamps, patterns, and any anomalies.\n"
+                    f"Be concise and structured.\n{files_content}"
+                )
+            }]
+        )
+    )
+    analysis = response.content[0].text if response.content else ""
+    result = {
+        "files_analyzed": [a.get("filename") for a in text_files],
+        "file_count": len(text_files),
+        "analysis": analysis,
+    }
+    state["log_analysis"] = result
+    logger.info(f"Log analysis complete for {len(text_files)} file(s)")
+    return result
+
+
+async def _handle_analyze_images(inputs: dict, state: dict) -> dict:
+    """Perform visual analysis on image attachments using Claude vision."""
+    import anthropic as anthropic_sdk
+
+    settings = get_settings()
+    attachments = state.get("attachments", [])
+    images = [a for a in attachments if a.get("type") == "image"]
+
+    if not images:
+        return {"skipped": True, "reason": "No image attachments found"}
+
+    focus = inputs.get("focus", "error messages, metric anomalies, and SRE-relevant signals")
+
+    client = anthropic_sdk.Anthropic(api_key=settings.anthropic_api_key)
+
+    # Build content blocks: one message with all images + instructions
+    content_blocks: list = [{
+        "type": "text",
+        "text": (
+            f"You are an SRE visual analyst. Analyze these {len(images)} image(s) focusing on: {focus}\n"
+            "For each image extract: visible error messages, metric values, graphs/trends, "
+            "UI state, and any anomalies that are relevant to incident triage. Be concise."
+        )
+    }]
+    for att in images:
+        content_blocks.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": att.get("media_type", "image/png"),
+                "data": att["data"],
+            }
+        })
+        content_blocks.append({"type": "text", "text": f"[Image: {att.get('filename')}]"})
+
+    response = await asyncio.get_event_loop().run_in_executor(
+        None,
+        lambda: client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            messages=[{"role": "user", "content": content_blocks}]
+        )
+    )
+    analysis = response.content[0].text if response.content else ""
+    result = {
+        "images_analyzed": [a.get("filename") for a in images],
+        "image_count": len(images),
+        "analysis": analysis,
+    }
+    state["image_analysis"] = result
+    logger.info(f"Image analysis complete for {len(images)} image(s)")
+    return result
+
+
 async def _handle_query_metrics(inputs: dict, state: dict) -> dict:
     """
     [SKILL] Simulate querying Prometheus/Grafana metrics for the affected service.
@@ -304,6 +444,8 @@ TOOL_HANDLERS: dict[str, Any] = {
     "create_ticket":      _handle_create_ticket,
     "send_notifications": _handle_send_notifications,
     "query_metrics":      _handle_query_metrics,
+    "analyze_logs":       _handle_analyze_logs,
+    "analyze_images":     _handle_analyze_images,
 }
 
 # Map tool name → WS agent id (for UI pipeline panel)
@@ -316,6 +458,8 @@ TOOL_TO_AGENT_ID = {
     "create_ticket":      "ticket",
     "send_notifications": "notify",
     "query_metrics":      "metrics",
+    "analyze_logs":       "log_analysis",
+    "analyze_images":     "image_analysis",
 }
 
 TOOL_START_MSG = {
@@ -327,6 +471,8 @@ TOOL_START_MSG = {
     "create_ticket":      "Creating Jira ticket...",
     "send_notifications": "Sending email and Slack notifications...",
     "query_metrics":      "Querying service metrics (error rate, latency)...",
+    "analyze_logs":       "Analyzing attached log files for error patterns...",
+    "analyze_images":     "Running visual analysis on attached images...",
 }
 
 
@@ -401,12 +547,24 @@ async def run_incident_pipeline(
 
     # ── initial message (with optional attachments) ───────────────────────────
     attachments = incident_data.get("attachments") or []
+    image_atts  = [a for a in attachments if a.get("type") == "image"]
+    text_atts   = [a for a in attachments if a.get("type") == "text"]
+
+    att_summary = ""
+    if image_atts:
+        att_summary += f"\nImage attachments ({len(image_atts)}): {', '.join(a['filename'] for a in image_atts)} → call analyze_images"
+    if text_atts:
+        att_summary += f"\nLog/text attachments ({len(text_atts)}): {', '.join(a['filename'] for a in text_atts)} → call analyze_logs"
+    if not attachments:
+        att_summary = "\nNo attachments."
+
     base_text = (
         f"Triage this incident:\n\n"
         f"Title: {incident_data.get('title', '')}\n"
         f"Description: {incident_data.get('description', '') or incident_data.get('raw_text', '')}\n"
         f"Reporter: {incident_data.get('reporter_email', '')}\n"
-        f"Incident ID: {incident_id}"
+        f"Incident ID: {incident_id}\n"
+        f"Attachments:{att_summary}"
     )
 
     # Build content blocks — text first, then attachments
@@ -552,6 +710,8 @@ async def run_incident_pipeline(
             "dedup_result":    dedup,
             "triage_verdict":  verdict,
             "metrics_result":  state.get("metrics_result") or {},
+            "log_analysis":    state.get("log_analysis") or {},
+            "image_analysis":  state.get("image_analysis") or {},
         }
 
         await event_store.save_pipeline_result(incident_id, pipeline_summary)

@@ -14,6 +14,8 @@ const TOOL_META = {
   code_analysis: { icon:"💻", label:"search_codebase",    color:"#86efac", skill:false },
   dedup:         { icon:"🔁", label:"check_duplicates",   color:"#86efac", skill:false },
   metrics:       { icon:"📊", label:"query_metrics",      color:"#c4b5fd", skill:true  },
+  log_analysis:  { icon:"📄", label:"analyze_logs",       color:"#fb923c", skill:false },
+  image_analysis:{ icon:"🖼", label:"analyze_images",     color:"#f472b6", skill:false },
   triage_synth:  { icon:"⚙️", label:"synthesize_triage",  color:"#fcd34d", skill:false },
   escalate:      { icon:"🚨", label:"escalate_p1",        color:"#fca5a5", skill:false },
   ticket:        { icon:"🎫", label:"create_ticket",      color:"#a5b4fc", skill:false },
@@ -21,7 +23,7 @@ const TOOL_META = {
 };
 
 // All tools in canonical pipeline order (for the "used / skipped" overview)
-const ALL_TOOLS = ["intake","code_analysis","dedup","metrics","triage_synth","escalate","ticket","notify"];
+const ALL_TOOLS = ["intake","code_analysis","dedup","metrics","log_analysis","image_analysis","triage_synth","escalate","ticket","notify"];
 
 function cleanStep(s) { return s.replace(/^\d+\.\d*\s*/, "").replace(/^[-•]\s*/, "").trim(); }
 
@@ -71,6 +73,14 @@ function ToolSnippet({ agent, data }) {
     return <span style={{...st, color:"#fca5a5"}}>oncall paged · {data.team_paged || "sre-team"}</span>;
   if (agent === "ticket")
     return <span style={{...st, color:"#a5b4fc", fontFamily:"monospace"}}>{data.ticket_id || "MANUAL-REQUIRED"}</span>;
+  if (agent === "log_analysis") {
+    if (data.skipped) return <span style={{...st, color:"var(--text3)"}}>no log files</span>;
+    return <span style={st}>{data.file_count} file{data.file_count>1?"s":""} · {(data.files_analyzed||[]).join(", ")}</span>;
+  }
+  if (agent === "image_analysis") {
+    if (data.skipped) return <span style={{...st, color:"var(--text3)"}}>no images</span>;
+    return <span style={st}>{data.image_count} image{data.image_count>1?"s":""} · {(data.images_analyzed||[]).join(", ")}</span>;
+  }
   if (agent === "notify") {
     const sent = (data.notifications_sent||[]).map(n => n.replace("_email"," ✉").replace("slack","💬 slack"));
     return <span style={st}>{sent.join(" · ") || "none"}</span>;
@@ -400,6 +410,40 @@ function RunbookCard({ runbook, assigneeTeam, escalation }) {
   );
 }
 
+// ── Log analysis card ─────────────────────────────────────────────────────────
+function LogAnalysisCard({ data }) {
+  if (!data || data.skipped || !data.analysis) return null;
+  return (
+    <div style={{ background:"var(--surface)", border:"1px solid rgba(251,146,60,.25)", borderRadius:10, overflow:"hidden" }}>
+      <div style={{ padding:"10px 16px", borderBottom:"1px solid rgba(251,146,60,.2)", display:"flex", alignItems:"center", gap:8 }}>
+        <span style={{ fontSize:13 }}>📄</span>
+        <span style={{ fontSize:11, fontWeight:700, color:"#fb923c", textTransform:"uppercase", letterSpacing:"0.07em" }}>Log Analysis</span>
+        <span style={{ fontSize:10, color:"var(--text3)", marginLeft:"auto" }}>{(data.files_analyzed||[]).join(", ")}</span>
+      </div>
+      <div style={{ padding:"14px 16px" }}>
+        <pre style={{ fontSize:11, color:"var(--text2)", lineHeight:1.65, whiteSpace:"pre-wrap", wordBreak:"break-word", fontFamily:"'JetBrains Mono',monospace", margin:0 }}>{data.analysis}</pre>
+      </div>
+    </div>
+  );
+}
+
+// ── Image analysis card ───────────────────────────────────────────────────────
+function ImageAnalysisCard({ data }) {
+  if (!data || data.skipped || !data.analysis) return null;
+  return (
+    <div style={{ background:"var(--surface)", border:"1px solid rgba(244,114,182,.25)", borderRadius:10, overflow:"hidden" }}>
+      <div style={{ padding:"10px 16px", borderBottom:"1px solid rgba(244,114,182,.2)", display:"flex", alignItems:"center", gap:8 }}>
+        <span style={{ fontSize:13 }}>🖼</span>
+        <span style={{ fontSize:11, fontWeight:700, color:"#f472b6", textTransform:"uppercase", letterSpacing:"0.07em" }}>Image Analysis</span>
+        <span style={{ fontSize:10, color:"var(--text3)", marginLeft:"auto" }}>{(data.images_analyzed||[]).join(", ")}</span>
+      </div>
+      <div style={{ padding:"14px 16px" }}>
+        <pre style={{ fontSize:11, color:"var(--text2)", lineHeight:1.65, whiteSpace:"pre-wrap", wordBreak:"break-word", fontFamily:"'JetBrains Mono',monospace", margin:0 }}>{data.analysis}</pre>
+      </div>
+    </div>
+  );
+}
+
 // ── Code files card ───────────────────────────────────────────────────────────
 function CodeFilesCard({ files }) {
   if (!files?.length) return null;
@@ -480,6 +524,10 @@ function buildToolLogFromPR(pr) {
     log.push({ turn:2, agent:"dedup",         status:"done", result:{ ...pr.dedup_result } });
   if (pr.metrics_result && Object.keys(pr.metrics_result).length)
     log.push({ turn:2, agent:"metrics",       status:"done", result:{ ...pr.metrics_result } });
+  if (pr.log_analysis && Object.keys(pr.log_analysis).length)
+    log.push({ turn:2, agent:"log_analysis",  status:"done", result:{ ...pr.log_analysis } });
+  if (pr.image_analysis && Object.keys(pr.image_analysis).length)
+    log.push({ turn:2, agent:"image_analysis",status:"done", result:{ ...pr.image_analysis } });
   if (pr.triage_verdict || pr.severity) {
     const v = pr.triage_verdict || {};
     log.push({ turn:3, agent:"triage_synth",  status:"done", result:{ severity:v.severity||pr.severity, confidence:v.confidence||pr.confidence, runbook_steps:(v.runbook||pr.runbook||[]).length } });
@@ -529,6 +577,10 @@ export default function TriageView({ incidentId, onBack }) {
         }
         if (pr.metrics_result && Object.keys(pr.metrics_result).length)
           ns.metrics = { status:"done", result:{ ...pr.metrics_result } };
+        if (pr.log_analysis && Object.keys(pr.log_analysis).length)
+          ns.log_analysis = { status:"done", result:{ ...pr.log_analysis } };
+        if (pr.image_analysis && Object.keys(pr.image_analysis).length)
+          ns.image_analysis = { status:"done", result:{ ...pr.image_analysis } };
         if (pr.ticket_id)
           ns.ticket = { status:"done", result:{ ticket_id:pr.ticket_id } };
         if (pr.notifications_sent)
@@ -596,6 +648,8 @@ export default function TriageView({ incidentId, onBack }) {
   const assigneeTeam = verdict?.suggested_assignee_team || summary?.suggested_assignee_team || "";
   const escalation   = summary?.escalation_triggered || false;
   const totalIters   = summary?.iterations || null;
+  const logAnalysis  = agentState.log_analysis?.result || null;
+  const imageAnalysis= agentState.image_analysis?.result || null;
 
   return (
     <div style={{ display:"grid", gridTemplateColumns:"320px 1fr", gap:20, alignItems:"start" }}>
@@ -632,6 +686,8 @@ export default function TriageView({ incidentId, onBack }) {
         {pipelineDone && runbook.length > 0 && (
           <RunbookCard runbook={runbook} assigneeTeam={assigneeTeam} escalation={escalation} />
         )}
+        <LogAnalysisCard data={logAnalysis} />
+        <ImageAnalysisCard data={imageAnalysis} />
         <CodeFilesCard files={codeFiles} />
       </div>
     </div>

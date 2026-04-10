@@ -77,7 +77,10 @@ export default function IncidentForm({ onSubmitted }) {
       const r = await fetch("/api/incidents", { method:"POST", body:fd });
       if (!r.ok) {
         const d = await r.json().catch(() => ({}));
-        setErrors({ _: d.detail || "Submission failed" });
+        const detail = typeof d.detail === "string" ? d.detail
+          : Array.isArray(d.detail) ? d.detail.map(e => e.msg || JSON.stringify(e)).join("; ")
+          : "Submission failed";
+        setErrors({ _: detail });
         setLoading(false); return;
       }
       const d = await r.json();

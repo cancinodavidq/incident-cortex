@@ -1,6 +1,6 @@
 # Quick Start & Operations Guide
 
-A one-page reference for running and troubleshooting Incident Cortex.
+A one-page reference for running and troubleshooting Incident Cortex — a 10-tool ReAct pipeline that triages SRE incidents in ~15 seconds.
 
 ---
 
@@ -8,7 +8,7 @@ A one-page reference for running and troubleshooting Incident Cortex.
 
 - **Docker & Docker Compose:** v20.10+
 - **API Keys:**
-  - `ANTHROPIC_API_KEY` (required) — Claude 3.5 Sonnet access
+  - `ANTHROPIC_API_KEY` (required) — `claude-sonnet-4-6` (orchestrator) + `claude-haiku-4-5-20251001` (log/image analysis)
   - `OPENAI_API_KEY` (optional) — For OpenAI embeddings; defaults to Sentence Transformers if omitted
   - `JIRA_URL`, `JIRA_USER`, `JIRA_TOKEN` (optional) — For real Jira integration; mocked by default
   - `SLACK_BOT_TOKEN` (optional) — For real Slack integration; mocked by default
@@ -50,13 +50,13 @@ open http://localhost:3000
 ### Submit an Incident via curl
 
 ```bash
+# Text-only incident
 curl -X POST http://localhost:8000/api/incidents \
   -H "Content-Type: application/json" \
   -d '{
-    "reporter": "alice@company.com",
+    "reporter_email": "alice@company.com",
     "title": "Login endpoint returning 500s",
-    "description": "Users unable to log in. Started ~14:30 UTC. Affects ~500 users.",
-    "source": "slack"
+    "description": "Users unable to log in. Started ~14:30 UTC. Affects ~500 users."
   }'
 
 # Response:
@@ -117,8 +117,8 @@ docker compose logs indexer -f
 
 ### View Mock Jira
 
-Open http://localhost:8080
-Default credentials: `admin` / `password`
+Open http://localhost:8081
+(No credentials required — open access for demo)
 
 ### View Mock Slack
 
@@ -149,20 +149,20 @@ Captures all outgoing emails from the Notification Agent.
 **Symptom:** "Timeout waiting for Claude response" in logs.
 
 **Solutions:**
-1. Verify `ANTHROPIC_API_KEY` is valid: `curl -H "Authorization: Bearer $ANTHROPIC_API_KEY" https://api.anthropic.com/health`
+1. Verify `ANTHROPIC_API_KEY` is valid: `curl -H "x-api-key: $ANTHROPIC_API_KEY" https://api.anthropic.com/v1/models`
 2. Check network latency: `ping api.anthropic.com`
-3. Increase timeout in `.env`: `LLM_TIMEOUT_SECONDS=60` (default: 30)
-4. Check if rate-limited: look for "429" errors in logs
+3. Orchestrator timeout is 90s per ReAct turn — if exceeded, check for API rate limits (429 errors in logs)
+4. Models used: `claude-sonnet-4-6` (orchestrator), `claude-haiku-4-5-20251001` (log/image analysis)
 
 ### ChromaDB Connection Refused
 
-**Symptom:** "Connection refused: 127.0.0.1:6000" in backend logs.
+**Symptom:** "Connection refused: chromadb:8001" in backend logs.
 
 **Solutions:**
 1. Check ChromaDB is running: `docker compose ps | grep chroma`
-2. Restart ChromaDB: `docker compose restart chroma`
-3. Check logs: `docker compose logs chroma`
-4. Verify port mapping: `docker compose config | grep -A 5 'chroma:'`
+2. Restart ChromaDB: `docker compose restart chromadb`
+3. Check logs: `docker compose logs chromadb`
+4. ChromaDB internal port is 8000, mapped to host 8001 — backend config uses `CHROMA_PORT=8001`
 
 ### Backend API Won't Start
 
@@ -190,20 +190,21 @@ Captures all outgoing emails from the Notification Agent.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `ANTHROPIC_API_KEY` | (required) | Claude API key |
-| `OPENAI_API_KEY` | (optional) | OpenAI embeddings; omit for Sentence Transformers |
-| `CHROMA_HOST` | `chroma` | ChromaDB hostname (Docker) |
-| `CHROMA_PORT` | `6000` | ChromaDB port |
-| `JIRA_MOCK_MODE` | `true` | Use mock Jira; set `false` for real Jira |
-| `JIRA_URL` | (optional) | Real Jira instance URL |
-| `JIRA_USER` | (optional) | Jira username |
-| `JIRA_TOKEN` | (optional) | Jira API token |
-| `SLACK_MOCK_MODE` | `true` | Use mock Slack; set `false` for real Slack |
-| `SLACK_BOT_TOKEN` | (optional) | Slack bot token |
-| `DEDUP_SIMILARITY_THRESHOLD` | `0.75` | Duplicate detection sensitivity (0.0–1.0) |
-| `LLM_TIMEOUT_SECONDS` | `30` | Max time to wait for Claude response |
+| `ANTHROPIC_API_KEY` | (required) | Powers `claude-sonnet-4-6` (orchestrator) and `claude-haiku-4-5-20251001` (log/image analysis) |
+| `OPENAI_API_KEY` | (optional) | OpenAI embeddings; omit to use Sentence Transformers |
+| `CHROMA_HOST` | `chromadb` | ChromaDB service hostname in Docker network |
+| `CHROMA_PORT` | `8001` | ChromaDB port (internal 8000 mapped to host 8001) |
+| `JIRA_MOCK_URL` | `http://jira-mock:8080` | Mock Jira URL (browse at localhost:8081) |
+| `SLACK_MOCK_URL` | `http://slack-mock:8090` | Mock Slack URL |
+| `MAILHOG_SMTP_HOST` | `mailhog` | SMTP host for email notifications |
+| `MAILHOG_SMTP_PORT` | `1025` | SMTP port |
+| `DEDUP_SUGGESTION_THRESHOLD` | `0.85` | Similarity ≥ this → skip ticket, link to existing |
+| `DEDUP_DUPLICATE_THRESHOLD` | `0.95` | Similarity ≥ this → confirmed merge |
+| `RATE_LIMIT_PER_MINUTE` | `10` | Max incident submissions per IP per minute |
+| `LANGFUSE_PUBLIC_KEY` | (optional) | Enable Langfuse LLM tracing (port 3001) |
+| `LANGFUSE_SECRET_KEY` | (optional) | Required alongside public key |
 | `LOG_LEVEL` | `INFO` | Logging verbosity: DEBUG, INFO, WARN, ERROR |
-| `CODEBASE_PATH` | `./reaction-commerce` | Path to codebase for indexing |
+| `CODEBASE_PATH` | (ecommerce_repo_url) | Repo URL for the indexer to clone and embed |
 
 ---
 

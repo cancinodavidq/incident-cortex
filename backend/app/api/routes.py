@@ -116,7 +116,7 @@ async def submit_incident(
     title: str = Form(...),
     description: str = Form(...),
     reporter_email: EmailStr = Form(...),
-    files: Optional[List[UploadFile]] = File(None)
+    files: List[UploadFile] = File(default=[])
 ):
     """
     Submit a new incident for triage.

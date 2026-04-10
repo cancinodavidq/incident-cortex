@@ -59,12 +59,16 @@ function FlowDiagram() {
         {box("parse_incident", "🔍", "#a5b4fc", "intake")}
         {arrow("parallel fan-out")}
 
-        <div style={{ display: "flex", alignItems: "flex-start", gap: 0 }}>
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 0, flexWrap: "wrap", justifyContent: "center" }}>
           {box("search_codebase", "💻", "#86efac", "RAG · ChromaDB")}
           {harrow()}
           {box("check_duplicates", "🔁", "#86efac", "embeddings")}
           {harrow()}
           {box("query_metrics", "📊", "#c4b5fd", "SKILL · Prometheus")}
+          {harrow()}
+          {box("analyze_logs", "📄", "#fb923c", "if log attached")}
+          {harrow()}
+          {box("analyze_images", "🖼", "#f472b6", "if image attached")}
         </div>
 
         {arrow("all results in")}
@@ -170,6 +174,22 @@ const AGENTS = [
     outputs: ["notifications_sent: ['team_email', 'reporter_email', 'slack']"],
     when: "Always, as the final step.",
   },
+  {
+    id: "analyze_logs", icon: "📄", color: "#fb923c", label: "analyze_logs",
+    role: "Log file analysis",
+    desc: "Activated automatically when the incident includes log or text attachments (.log, .txt, .csv, .json, .yaml). Uses Claude Haiku to scan all attached files in a single pass — extracting top errors, exception types, frequencies, timestamps, and anomalous patterns. Results are passed to synthesize_triage to improve root cause accuracy.",
+    inputs: ["focus (optional hint)", "attachments from state (type=text)"],
+    outputs: ["files_analyzed", "file_count", "analysis (error patterns, stack traces, anomalies)"],
+    when: "Turn 2 in parallel — ONLY if log/text attachments are present.",
+  },
+  {
+    id: "analyze_images", icon: "🖼", color: "#f472b6", label: "analyze_images",
+    role: "Image visual analysis",
+    desc: "Activated automatically when the incident includes image attachments (.png, .jpg, .jpeg, .gif). Uses Claude Haiku vision to analyze all images in a single turn — reading error dialogs, Grafana/dashboard screenshots, flamegraphs, CPU/memory graphs, or UI error states. Results are passed to synthesize_triage to enrich the verdict.",
+    inputs: ["focus (optional hint)", "attachments from state (type=image)"],
+    outputs: ["images_analyzed", "image_count", "analysis (extracted errors, metric values, visual anomalies)"],
+    when: "Turn 2 in parallel — ONLY if image attachments are present.",
+  },
 ];
 
 function AgentCard({ agent }) {
@@ -252,6 +272,8 @@ const DECISIONS = [
   { condition: "anomaly_detected = true (query_metrics)", action: "Metric data included in synthesize_triage context to inform higher severity", color: "#c4b5fd" },
   { condition: "code_analysis.degraded = true", action: "Pipeline continues without code data — partial-information triage", color: "var(--text3)" },
   { condition: "create_ticket fails", action: "ticket_id = MANUAL-REQUIRED — pipeline does not abort", color: "var(--text3)" },
+  { condition: "log/text attachments present", action: "analyze_logs called in parallel at turn 2 — error patterns and stack traces injected into synthesize_triage context", color: "#fb923c" },
+  { condition: "image attachments present", action: "analyze_images called in parallel at turn 2 — visual anomalies and extracted errors injected into synthesize_triage context", color: "#f472b6" },
 ];
 
 function DecisionTable() {
@@ -284,8 +306,8 @@ function DecisionTable() {
 // ── ReAct loop explanation ────────────────────────────────────────────────────
 function LoopExplanation() {
   const steps = [
-    { n: 1, title: "Claude receives the incident", desc: "The model receives the incident text and the schemas for all 8 available tools. There is no hardcoded routing — Claude reasons about what to do next." },
-    { n: 2, title: "Claude emits tool_use blocks", desc: "Responds with one or more tool_use blocks. It can call multiple tools in a single turn (search_codebase + check_duplicates + query_metrics in parallel)." },
+    { n: 1, title: "Claude receives the incident", desc: "The model receives the incident text (with any attachments inline) and the schemas for all 10 available tools. There is no hardcoded routing — Claude reasons about what to do next." },
+    { n: 2, title: "Claude emits tool_use blocks", desc: "Responds with one or more tool_use blocks. It calls multiple tools in a single turn: search_codebase + check_duplicates + query_metrics always, plus analyze_logs if log/text files are attached, and analyze_images if image files are attached." },
     { n: 3, title: "Parallel execution", desc: "asyncio.gather runs all tools in the turn simultaneously. Each tool emits agent_started and agent_completed events over WebSocket in real time." },
     { n: 4, title: "Results → context", desc: "Results are appended to the message history as tool_result content blocks. Claude reads them in the next turn to inform its next decision." },
     { n: 5, title: "Loop until end_turn", desc: "Repeats until Claude stops calling tools (stop_reason=end_turn) or the 15-iteration safety cap is hit. In practice the pipeline completes in 5–7 turns." },
@@ -325,9 +347,10 @@ export default function SystemDocs() {
         </p>
         <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
           {[
-            ["8 tools", "#a5b4fc"], ["parallel turn 2", "#86efac"],
+            ["10 tools", "#a5b4fc"], ["parallel turn 2", "#86efac"],
             ["max 15 iterations", "#fcd34d"], ["real-time WebSocket", "#fdba74"],
             ["RAG · ChromaDB · 4449 chunks", "#86efac"], ["semantic deduplication", "#c4b5fd"],
+            ["log analysis", "#fb923c"], ["image vision", "#f472b6"],
           ].map(([label, color]) => (
             <Tag key={label} color={color}>{label}</Tag>
           ))}

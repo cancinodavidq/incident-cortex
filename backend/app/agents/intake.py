@@ -51,29 +51,33 @@ async def intake_agent(state: IncidentState) -> dict:
 
         extracted_from_image = None
 
-        # Process image attachments with Claude vision
-        if attachments:
-            image_texts = []
-            for att in attachments:
-                content_type = att.get("content_type", "")
-                if content_type.startswith("image/"):
-                    try:
-                        # Call Claude vision on image
-                        image_data = att.get("data", "")  # base64 or binary
-                        vision_prompt = "Extract any visible error messages, stack traces, logs, or relevant technical information from this image."
-                        vision_result = await llm_client.vision_extract(image_data, vision_prompt)
-                        if vision_result:
-                            image_texts.append(vision_result)
-                    except Exception as e:
-                        logger.warning(f"Vision extraction failed for attachment: {e}")
+        # Process attachments
+        image_texts = []
+        text_attachment_parts = []
+        for att in attachments:
+            att_type = att.get("type", "")
+            if att_type == "image":
+                try:
+                    image_data = att.get("data", "")
+                    vision_prompt = "Extract any visible error messages, stack traces, logs, or relevant technical information from this image."
+                    vision_result = await llm_client.vision_extract(image_data, vision_prompt)
+                    if vision_result:
+                        image_texts.append(f"[Image: {att.get('filename', 'attachment')}]\n{vision_result}")
+                except Exception as e:
+                    logger.warning(f"Vision extraction failed for {att.get('filename')}: {e}")
+            elif att_type == "text":
+                content = att.get("content", "")[:8000]
+                text_attachment_parts.append(f"[File: {att.get('filename', 'attachment')}]\n{content}")
 
-            if image_texts:
-                extracted_from_image = "\n".join(image_texts)
+        if image_texts:
+            extracted_from_image = "\n".join(image_texts)
 
         # Build prompt for LLM
         full_incident_text = raw_text
         if extracted_from_image:
-            full_incident_text += f"\n\n[Extracted from image]\n{extracted_from_image}"
+            full_incident_text += f"\n\n[Extracted from images]\n{extracted_from_image}"
+        if text_attachment_parts:
+            full_incident_text += "\n\n[Attached files]\n" + "\n\n".join(text_attachment_parts)
 
         system_prompt = """You are an SRE incident intake agent for a Node.js e-commerce platform.
 Parse the incident report and identify the affected service, error type, and symptoms.

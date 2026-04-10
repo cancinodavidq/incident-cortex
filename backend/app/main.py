@@ -70,8 +70,13 @@ async def health_check():
     event_store = await get_event_store()
 
     try:
-        # Check if indexing is complete by querying system_status
+        # Check if indexing is complete: first try DB, then fall back to ChromaDB count
         indexing_complete = await event_store.check_indexing_status()
+        if not indexing_complete:
+            from app.services.vector_store import VectorStore
+            vs = VectorStore()
+            count = vs.collection.count() if vs.collection else 0
+            indexing_complete = count > 0
     except Exception as e:
         logger.warning(f"Failed to check indexing status: {e}")
         indexing_complete = False

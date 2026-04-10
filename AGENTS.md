@@ -124,7 +124,30 @@ All agent state flows through a mutable `dict` passed to each tool handler.
 
 ---
 
-### 7. notify
+### 7. analyze_logs (conditional — text/log attachments only)
+- **File**: `backend/app/agents/orchestrator.py` (inline handler `_handle_analyze_logs`)
+- **Role**: LLM-powered analysis of attached log and text files (.log, .txt, .csv, .json, .yaml). Extracts top errors, exception frequencies, timestamps, and anomaly patterns. Runs in parallel with `search_codebase`, `check_duplicates`, and `query_metrics` in Turn 2.
+- **Model**: `claude-haiku-4-5-20251001` (speed-optimized; full analysis within 1,024 output tokens)
+- **Input fields**: `attachments` (text type), optional `focus` hint (e.g., "latency spikes", "crash frequency")
+- **Output fields**: `files_analyzed[]`, `file_count`, `analysis` (structured text summary of errors/patterns); written to `state["log_analysis"]`
+- **Trigger condition**: Only invoked when `attachments` contains at least one `type=text` entry. Returns `{"skipped": True}` otherwise.
+- **Content cap**: Each file truncated to 10,000 characters before inclusion in the prompt.
+- **Timeout**: Inherits 90s ReAct turn timeout
+
+---
+
+### 8. analyze_images (conditional — image attachments only)
+- **File**: `backend/app/agents/orchestrator.py` (inline handler `_handle_analyze_images`)
+- **Role**: Claude vision analysis of attached screenshots and images (.png, .jpg, .jpeg, .gif). Interprets dashboards, error dialogs, flamegraphs, metric graphs, and UI screenshots to extract SRE-relevant signals. Runs in parallel with `search_codebase`, `check_duplicates`, and `query_metrics` in Turn 2.
+- **Model**: `claude-haiku-4-5-20251001` with multimodal (vision) input; all images sent in a single multi-block message
+- **Input fields**: `attachments` (image type, base64-encoded), optional `focus` hint (e.g., "CPU graph anomaly", "error message")
+- **Output fields**: `images_analyzed[]`, `image_count`, `analysis` (structured text extraction of visible signals); written to `state["image_analysis"]`
+- **Trigger condition**: Only invoked when `attachments` contains at least one `type=image` entry. Returns `{"skipped": True}` otherwise.
+- **Timeout**: Inherits 90s ReAct turn timeout
+
+---
+
+### 9. notify
 - **File**: `backend/app/agents/notification.py`
 - **Role**: Send email (team + reporter) and Slack notifications in parallel
 - **Input fields**: `triage_verdict`, `parsed_incident`, `ticket_id`, `reporter_email`, `dedup_result`, `escalation_triggered`

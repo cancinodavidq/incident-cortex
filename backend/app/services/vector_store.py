@@ -113,7 +113,8 @@ class VectorStore:
     def collection(self):
         """Get code chunks collection."""
         if self._collection is None:
-            self._collection = self.get_collection("code_chunks")
+            # "ecommerce_codebase" is what the indexer writes to
+            self._collection = self.get_collection("ecommerce_codebase")
         return self._collection
 
     @property
